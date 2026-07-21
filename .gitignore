@@ -1,0 +1,17 @@
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+autoclicker
+
+# Output build artifacts
+bin/
+dist/
+
+# IDE & OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
