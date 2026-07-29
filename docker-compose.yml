@@ -1,0 +1,29 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: autoclicker_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./initdb/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - mysql_data:/var/lib/mysql
+
+  frontend_app:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: autoclicker_frontend
+    ports:
+      - "8081:80"
+    restart: always
+    depends_on:
+      - db
+
+volumes:
+  mysql_data:

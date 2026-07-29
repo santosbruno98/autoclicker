@@ -31,7 +31,7 @@ type StartJobRequest struct {
 
 // JobStatus represents an active automation task
 type JobStatus struct {
-	ID        string `json:"string"`
+	ID        string `json:"id"` // Fix: change "string" to "id"
 	TaskID    uint   `json:"task_id"`
 	PID       int    `json:"pid"`
 	TaskName  string `json:"task_name"`

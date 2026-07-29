@@ -23,4 +23,4 @@ export const deleteTask = async (id) => (await API.delete(`/tasks/${id}`)).data;
 // Automation Controls
 export const fetchAutomationStatus = async () => (await API.get('/automation/status')).data;
 export const startJob = async (payload) => (await API.post('/automation/start', payload)).data;
-export const stopJob = async () => (await API.post('/automation/stop', payload)).data;
+export const stopJob = async () => (await API.post('/automation/stop')).data;

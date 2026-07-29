@@ -9,14 +9,10 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// GetProcesses lists all running processes for dropdowns
-func GetProcesses(c *gin.Context) {
-	list, err := services.ListProcesses()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, list)
+// ProcessDTO for clean JSON output
+type ProcessDTO struct {
+	PID  int32  `json:"pid"`
+	Name string `json:"name"`
 }
 
 // StartJob receives configuration and kicks off background worker

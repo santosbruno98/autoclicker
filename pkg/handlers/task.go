@@ -2,14 +2,42 @@ package handlers
 
 import (
 	"net/http"
-
-	"github.com/gin-gonic/gin"
+	"strconv"
 
 	"autoclicker/pkg/database"
 	"autoclicker/pkg/models"
+
+	"github.com/gin-gonic/gin"
 )
 
-// CreateTask [POST /api/v1/tasks]
+// GetTasks fetches all saved automation tasks from MySQL
+func GetTasks(c *gin.Context) {
+	var tasks []models.Task
+	if err := database.DB.Find(&tasks).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, tasks)
+}
+
+// GetTaskByID fetches a single task by ID
+func GetTaskByID(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
+	var task models.Task
+	if err := database.DB.First(&task, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+
+	c.JSON(http.StatusOK, task)
+}
+
+// CreateTask saves a new automation profile to MySQL
 func CreateTask(c *gin.Context) {
 	var task models.Task
 	if err := c.ShouldBindJSON(&task); err != nil {
@@ -18,62 +46,46 @@ func CreateTask(c *gin.Context) {
 	}
 
 	if err := database.DB.Create(&task).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create task"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusCreated, task)
 }
 
-// GetTasks [GET /api/v1/tasks] - Loads all saved automation profiles
-func GetTasks(c *gin.Context) {
-	var tasks []models.Task
-	if err := database.DB.Find(&tasks).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks"})
-		return
-	}
-
-	c.JSON(http.StatusOK, tasks)
-}
-
-// GetTaskByID [GET /api/v1/tasks/:id]
-func GetTaskByID(c *gin.Context) {
-	id := c.Param("id")
-	var task models.Task
-
-	if err := database.DB.First(&task, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, task)
-}
-
-// UpdateTask [PUT /api/v1/tasks/:id]
+// UpdateTask modifies an existing task profile
 func UpdateTask(c *gin.Context) {
-	id := c.Param("id")
-	var task models.Task
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
 
+	var task models.Task
 	if err := database.DB.First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
 		return
 	}
 
-	var updateData models.Task
-	if err := c.ShouldBindJSON(&updateData); err != nil {
+	if err := c.ShouldBindJSON(&task); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	database.DB.Model(&task).Updates(updateData)
+	database.DB.Save(&task)
 	c.JSON(http.StatusOK, task)
 }
 
-// DeleteTask [DELETE /api/v1/tasks/:id]
+// DeleteTask removes a task profile by ID
 func DeleteTask(c *gin.Context) {
-	id := c.Param("id")
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return
+	}
+
 	if err := database.DB.Delete(&models.Task{}, id).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete task"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
