@@ -22,5 +22,12 @@ export const deleteTask = async (id) => (await API.delete(`/tasks/${id}`)).data;
 
 // Automation Controls
 export const fetchAutomationStatus = async () => (await API.get('/automation/status')).data;
+export const fetchAutomationLogs = async () => (await API.get('/automation/logs')).data;
 export const startJob = async (payload) => (await API.post('/automation/start', payload)).data;
 export const stopJob = async () => (await API.post('/automation/stop')).data;
+
+// Notes / Checklist APIs (separate SQLite-backed store)
+export const fetchNotes = async () => (await API.get('/notes')).data;
+export const createNote = async (content) => (await API.post('/notes', { content })).data;
+export const updateNote = async (id, payload) => (await API.put(`/notes/${id}`, payload)).data;
+export const deleteNote = async (id) => (await API.delete(`/notes/${id}`)).data;

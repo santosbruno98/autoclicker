@@ -1,5 +1,5 @@
 package main
-// go run pid_target.go -pid=12345 -keys="tab,1" -key-delay=0.5 -loop-delay=1.5
+// go run pid_target.go -pid=9408 -keys="tab,1" -key-delay=0.5 -loop-delay=1.5
 import (
 	"flag"
 	"fmt"
