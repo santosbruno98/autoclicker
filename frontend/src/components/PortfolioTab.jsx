@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { ComposedChart, AreaChart, Area, Bar, Cell, ResponsiveContainer, YAxis, Tooltip } from 'recharts';
-import { createHolding, deleteHolding, fetchPortfolioSummary, fetchPortfolioHistory } from '../services/api';
+import { createHolding, deleteHolding, fetchPortfolioSummary } from '../services/api';
+import TradingViewChart from './TradingViewChart';
 
 function fmt(n, decimals = 2) {
   if (n === undefined || n === null || Number.isNaN(n)) return '--';
@@ -28,9 +28,7 @@ function SessionBadge({ session }) {
 
 export default function PortfolioTab() {
   const [summary, setSummary] = useState(null);
-  const [history, setHistory] = useState({ usd: [], eur: [] });
-  const [chartType, setChartType] = useState('line'); // 'line' | 'candle'
-  const [chartCurrency, setChartCurrency] = useState('usd'); // 'usd' | 'eur'
+  const [selectedSymbol, setSelectedSymbol] = useState('');
 
   const [symbol, setSymbol] = useState('');
   const [shares, setShares] = useState('');
@@ -42,42 +40,21 @@ export default function PortfolioTab() {
 
   const loadSummary = useCallback(async () => {
     try {
-      setSummary(await fetchPortfolioSummary());
+      const data = await fetchPortfolioSummary();
+      setSummary(data);
+      // Default the chart to the first holding once we have data, but don't
+      // stomp on a symbol the user has already picked.
+      setSelectedSymbol((prev) => prev || data.holdings?.[0]?.symbol || '');
     } catch (err) {
       console.error('Failed to load portfolio summary:', err);
     }
   }, []);
 
-  const loadHistory = useCallback(async () => {
-    try {
-      const data = await fetchPortfolioHistory();
-      const mapSeries = (series) =>
-        (series || []).map((p) => ({
-          time: p.timestamp,
-          open: p.open,
-          high: p.high,
-          low: p.low,
-          close: p.close,
-          wick: [p.low, p.high],
-          body: [Math.min(p.open, p.close), Math.max(p.open, p.close)],
-          isUp: p.close >= p.open,
-        }));
-      setHistory({ usd: mapSeries(data.usd), eur: mapSeries(data.eur) });
-    } catch (err) {
-      console.error('Failed to load portfolio history:', err);
-    }
-  }, []);
-
   useEffect(() => {
     loadSummary();
-    loadHistory();
-    const summaryInterval = setInterval(loadSummary, 15000);
-    const historyInterval = setInterval(loadHistory, 60000);
-    return () => {
-      clearInterval(summaryInterval);
-      clearInterval(historyInterval);
-    };
-  }, [loadSummary, loadHistory]);
+    const interval = setInterval(loadSummary, 15000);
+    return () => clearInterval(interval);
+  }, [loadSummary]);
 
   const handleAdd = async (e) => {
     e.preventDefault();
@@ -97,7 +74,6 @@ export default function PortfolioTab() {
       setPurchasePrice('');
       setPurchaseDate('');
       loadSummary();
-      loadHistory();
     } catch (err) {
       setError('Failed to add holding — check the symbol and try again.');
     } finally {
@@ -109,34 +85,17 @@ export default function PortfolioTab() {
     try {
       await deleteHolding(id);
       loadSummary();
-      loadHistory();
     } catch (err) {
       console.error('Failed to delete holding:', err);
     }
   };
 
   const dayPositive = (summary?.day_change_abs_usd ?? 0) >= 0;
-  const lineColor = dayPositive ? '#3DDC84' : '#FF4D4D';
-  const chartData = history[chartCurrency];
-  const currencySymbol = chartCurrency === 'usd' ? '$' : '€';
-
-  const CandleTooltip = ({ active, payload }) => {
-    if (!active || !payload || !payload.length) return null;
-    const d = payload[0].payload;
-    return (
-      <div className="bg-housing border border-slate-700 rounded px-3 py-2 text-xs font-mono">
-        <div className="text-slate-400 mb-1">{new Date(d.time * 1000).toLocaleTimeString()}</div>
-        <div>O: {currencySymbol}{fmt(d.open)}</div>
-        <div>H: {currencySymbol}{fmt(d.high)}</div>
-        <div>L: {currencySymbol}{fmt(d.low)}</div>
-        <div>C: {currencySymbol}{fmt(d.close)}</div>
-      </div>
-    );
-  };
+  const holdingSymbols = summary?.holdings?.map((h) => h.symbol) || [];
 
   return (
     <div className="flex flex-col gap-4">
-      {/* Hero: value + intraday chart, in USD and EUR */}
+      {/* Hero: real portfolio totals (your data) + TradingView chart (their data, per symbol) */}
       <div className="bg-slate-900 border border-slate-800 rounded p-6">
         <div className="text-sm text-slate-400 mb-1">Portfolio Value</div>
         <div className="flex items-baseline gap-4 mb-1">
@@ -149,78 +108,37 @@ export default function PortfolioTab() {
         </div>
         {summary && (
           <div className={`text-sm font-mono ${dayPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {dayPositive ? '▲' : '▼'} ${fmt(Math.abs(summary.day_change_abs_usd))} / €{fmt(Math.abs(summary.day_change_abs_eur))} ({fmt(Math.abs(summary.day_change_pct))}%) Today
+            {dayPositive ? '▲' : '▼'} ${fmt(Math.abs(summary.day_change_abs_usd))} / €{fmt(Math.abs(summary.day_change_abs_eur))} ({fmt(Math.abs(summary.day_change_percent))}%) Today
           </div>
         )}
 
-        {/* Chart controls */}
-        <div className="flex gap-4 mt-4">
-          <div className="flex gap-1 text-xs">
-            {['line', 'candle'].map((t) => (
-              <button
-                key={t}
-                onClick={() => setChartType(t)}
-                className={`px-2 py-1 rounded font-semibold capitalize ${
-                  chartType === t ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
+        {holdingSymbols.length > 0 && (
+          <div className="flex items-center gap-2 mt-4">
+            <span className="text-xs text-slate-500 uppercase tracking-wider">Chart:</span>
+            <select
+              value={selectedSymbol}
+              onChange={(e) => setSelectedSymbol(e.target.value)}
+              className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100"
+            >
+              {holdingSymbols.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
           </div>
-          <div className="flex gap-1 text-xs">
-            {['usd', 'eur'].map((c) => (
-              <button
-                key={c}
-                onClick={() => setChartCurrency(c)}
-                className={`px-2 py-1 rounded font-semibold uppercase ${
-                  chartCurrency === c ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-        </div>
+        )}
 
-        <div className="h-56 mt-4 -mx-2">
-          {chartData.length > 1 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              {chartType === 'line' ? (
-                <AreaChart data={chartData}>
-                  <defs>
-                    <linearGradient id="portfolioFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={lineColor} stopOpacity={0.35} />
-                      <stop offset="100%" stopColor={lineColor} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <YAxis domain={['auto', 'auto']} hide />
-                  <Tooltip
-                    contentStyle={{ background: '#0B0D0F', border: '1px solid #2A2F35', borderRadius: 6 }}
-                    labelFormatter={(t) => new Date(t * 1000).toLocaleTimeString()}
-                    formatter={(v) => [`${currencySymbol}${fmt(v)}`, 'Value']}
-                  />
-                  <Area type="monotone" dataKey="close" stroke={lineColor} strokeWidth={2} fill="url(#portfolioFill)" />
-                </AreaChart>
-              ) : (
-                <ComposedChart data={chartData}>
-                  <YAxis domain={['auto', 'auto']} hide />
-                  <Tooltip content={<CandleTooltip />} />
-                  <Bar dataKey="wick" barSize={1} fill="#8A9099" isAnimationActive={false} />
-                  <Bar dataKey="body" barSize={6} isAnimationActive={false}>
-                    {chartData.map((d, i) => (
-                      <Cell key={i} fill={d.isUp ? '#3DDC84' : '#FF4D4D'} />
-                    ))}
-                  </Bar>
-                </ComposedChart>
-              )}
-            </ResponsiveContainer>
+        <div className="h-[420px] mt-3 -mx-2">
+          {selectedSymbol ? (
+            <TradingViewChart symbol={selectedSymbol} />
           ) : (
             <div className="h-full flex items-center justify-center text-slate-600 text-sm italic">
-              Not enough intraday data yet — add holdings to see the chart.
+              Add a holding to see its chart.
             </div>
           )}
         </div>
+        <p className="text-[11px] text-slate-600 mt-2">
+          Chart shows live data from TradingView for the selected symbol only — the total above is your actual portfolio value across all holdings.
+        </p>
       </div>
 
       {/* Add holding */}
@@ -301,7 +219,11 @@ export default function PortfolioTab() {
             <tbody>
               {(summary?.holdings || []).map((h) => (
                 <tr key={h.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
-                  <td className="p-2 font-bold text-slate-100">{h.symbol}</td>
+                  <td className="p-2 font-bold text-slate-100">
+                    <button onClick={() => setSelectedSymbol(h.symbol)} className="hover:underline">
+                      {h.symbol}
+                    </button>
+                  </td>
                   <td className="p-2 text-right font-mono">{fmt(h.shares, 4)}</td>
                   <td className="p-2 text-right font-mono">{fmtDate(h.purchase_date)}</td>
                   <td className="p-2 text-right font-mono">
@@ -310,7 +232,7 @@ export default function PortfolioTab() {
                       : '--'}
                   </td>
                   <td className="p-2 text-right font-mono">
-                    {h.quote_error ? (
+                    {h.quote_fetch_error ? (
                       <span className="text-rose-500 italic">error</span>
                     ) : (
                       <>
@@ -322,11 +244,11 @@ export default function PortfolioTab() {
                   <td className="p-2 text-right font-mono">
                     ${fmt(h.market_value_usd)} <span className="text-slate-500">/ €{fmt(h.market_value_eur)}</span>
                   </td>
-                  <td className="p-2 text-right font-mono"><GainCell value={h.day_gain_pct} isPct /></td>
+                  <td className="p-2 text-right font-mono"><GainCell value={h.day_gain_percent} isPct /></td>
                   <td className="p-2 text-right font-mono">
                     <GainCell value={h.day_gain_abs_usd} /> <span className="text-slate-600">/</span> <GainCell value={h.day_gain_abs_eur} />
                   </td>
-                  <td className="p-2 text-right font-mono"><GainCell value={h.total_gain_pct} isPct /></td>
+                  <td className="p-2 text-right font-mono"><GainCell value={h.total_gain_percent} isPct /></td>
                   <td className="p-2 text-right font-mono">
                     <GainCell value={h.total_gain_abs_usd} /> <span className="text-slate-600">/</span> <GainCell value={h.total_gain_abs_eur} />
                   </td>
@@ -348,7 +270,7 @@ export default function PortfolioTab() {
           </table>
         </div>
         <p className="text-[11px] text-slate-600 mt-2">
-          "AH"/"PM" badges indicate the last price shown is from after-hours or pre-market trading. Dividend income and realized gains aren't tracked yet.
+          Click a symbol to load its chart above. "AH"/"PM" badges indicate the last price shown is from after-hours or pre-market trading.
         </p>
       </div>
     </div>
