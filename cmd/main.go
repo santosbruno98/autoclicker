@@ -39,6 +39,7 @@ func main() {
 
 	database.InitDB()
 	database.InitNotesDB()
+	database.InitPortfolioDB()
 
 	r := gin.Default()
 	r.Use(CORSMiddleware())
@@ -56,12 +57,19 @@ func main() {
 		api.POST("/automation/start", handlers.StartJob)
 		api.POST("/automation/stop", handlers.StopJob)
 		api.GET("/automation/status", handlers.GetStatus)
-		
+
 		api.GET("/notes", handlers.GetNotes)
 		api.POST("/notes", handlers.CreateNote)
 		api.PUT("/notes/:id", handlers.UpdateNote)
 		api.DELETE("/notes/:id", handlers.DeleteNote)
-		
+
+		api.GET("/portfolio/holdings", handlers.GetHoldings)
+		api.POST("/portfolio/holdings", handlers.CreateHolding)
+		api.PUT("/portfolio/holdings/:id", handlers.UpdateHolding)
+		api.DELETE("/portfolio/holdings/:id", handlers.DeleteHolding)
+		api.GET("/portfolio/summary", handlers.GetPortfolioSummary)
+		api.GET("/portfolio/history", handlers.GetPortfolioHistory)
+
 	}
 
 	srv := &http.Server{

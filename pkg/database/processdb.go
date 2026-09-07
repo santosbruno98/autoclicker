@@ -31,7 +31,10 @@ func InitDB() {
 	}
 
 	var err error
-	DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	DB, err = gorm.Open(mysql.New(mysql.Config{
+		DSN:                      dsn,
+		DisableDatetimePrecision: true,
+	}), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Failed to connect to MySQL database: %v", err)
 	}

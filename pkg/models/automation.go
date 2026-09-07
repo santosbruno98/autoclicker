@@ -19,8 +19,8 @@ type Task struct {
 	KeyDelay  float64        `gorm:"default:0.5" json:"key_delay"`
 	LoopDelay float64        `gorm:"default:1.5" json:"loop_delay"`
 	AutoFocus bool           `gorm:"default:false" json:"auto_focus"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	CreatedAt time.Time      `gorm:"default:CURRENT_TIMESTAMP" json:"created_at"`
+	UpdatedAt time.Time      `gorm:"default:CURRENT_TIMESTAMP" json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 

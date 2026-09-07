@@ -31,3 +31,11 @@ export const fetchNotes = async () => (await API.get('/notes')).data;
 export const createNote = async (content) => (await API.post('/notes', { content })).data;
 export const updateNote = async (id, payload) => (await API.put(`/notes/${id}`, payload)).data;
 export const deleteNote = async (id) => (await API.delete(`/notes/${id}`)).data;
+
+// Portfolio APIs
+export const fetchHoldings = async () => (await API.get('/portfolio/holdings')).data;
+export const createHolding = async (payload) => (await API.post('/portfolio/holdings', payload)).data;
+export const updateHolding = async (id, payload) => (await API.put(`/portfolio/holdings/${id}`, payload)).data;
+export const deleteHolding = async (id) => (await API.delete(`/portfolio/holdings/${id}`)).data;
+export const fetchPortfolioSummary = async () => (await API.get('/portfolio/summary')).data;
+export const fetchPortfolioHistory = async () => (await API.get('/portfolio/history')).data;
