@@ -44,3 +44,10 @@ func StopJob(c *gin.Context) {
 func GetStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, services.Manager.GetStatus())
 }
+
+func GetLogs(c *gin.Context) {
+	logs := services.Manager.GetLogs()
+	c.JSON(http.StatusOK, gin.H{
+		"logs": logs,
+	})
+}

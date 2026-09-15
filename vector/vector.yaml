@@ -1,0 +1,63 @@
+sources:
+  kafka_network_logs:
+    type: kafka
+    bootstrap_servers: "kafka:29092"
+    group_id: "vector-network-group"
+    topics: ["network-logs"]
+    decoding:
+      codec: json
+
+  kafka_app_logs:
+    type: kafka
+    bootstrap_servers: "kafka:29092"
+    group_id: "vector-app-group"
+    topics: ["app-logs"]
+    decoding:
+      codec: json
+
+transforms:
+  network_metrics:
+    type: log_to_metric
+    inputs: ["kafka_network_logs"]
+    metrics:
+      - type: counter
+        field: status_code
+        name: http_requests_total
+
+  app_metrics:
+    type: log_to_metric
+    inputs: ["kafka_app_logs"]
+    metrics:
+      - type: counter
+        field: level
+        name: app_events_total
+
+sinks:
+  loki_network:
+    type: loki
+    inputs: ["kafka_network_logs"]
+    endpoint: "http://autoclicker-loki:3100"
+    healthcheck:
+      enabled: false
+    encoding:
+      codec: json
+    labels:
+      log_type: "network"
+      service: "autoclicker-go-backend"
+
+  loki_app:
+    type: loki
+    inputs: ["kafka_app_logs"]
+    endpoint: "http://autoclicker-loki:3100"
+    healthcheck:
+      enabled: false
+    encoding:
+      codec: json
+    labels:
+      log_type: "application"
+      service: "autoclicker-go-backend"
+
+  prometheus_out:
+    type: prometheus_exporter
+    inputs: ["network_metrics", "app_metrics"]
+    address: "0.0.0.0:9598"

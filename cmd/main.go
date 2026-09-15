@@ -12,8 +12,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 
+	"autoclicker/internal/middleware"
 	"autoclicker/pkg/database"
 	"autoclicker/pkg/handlers"
+	"autoclicker/pkg/kafka"
 	"autoclicker/pkg/services"
 )
 
@@ -37,12 +39,32 @@ func main() {
 		log.Println("No .env file found; defaulting to system environment variables.")
 	}
 
+	kafkaBroker := os.Getenv("KAFKA_BROKER")
+	if kafkaBroker == "" {
+		kafkaBroker = "localhost:9092"
+	}
+	brokers := []string{kafkaBroker}
+	topic := "app-logs"
+	serviceName := "autoclicker-go-backend"
+
+	// Initializing LogProducer with error handling
+	kafkaProducer, err := kafka.NewLogProducer(brokers, topic, serviceName)
+	if err != nil {
+		log.Fatalf("Failed to initialize Kafka producer: %v", err)
+	}
+	defer func() {
+		if err := kafkaProducer.Close(); err != nil {
+			log.Printf("Error closing Kafka producer: %v", err)
+		}
+	}()
+
 	database.InitDB()
 	database.InitNotesDB()
 	database.InitPortfolioDB()
 
 	r := gin.Default()
 	r.Use(CORSMiddleware())
+	r.Use(middleware.NetworkLogger(kafkaProducer.Writer))
 
 	api := r.Group("/api/v1")
 	{
@@ -57,6 +79,7 @@ func main() {
 		api.POST("/automation/start", handlers.StartJob)
 		api.POST("/automation/stop", handlers.StopJob)
 		api.GET("/automation/status", handlers.GetStatus)
+		api.GET("/automation/logs", handlers.GetLogs)
 
 		api.GET("/notes", handlers.GetNotes)
 		api.POST("/notes", handlers.CreateNote)
@@ -69,7 +92,6 @@ func main() {
 		api.DELETE("/portfolio/holdings/:id", handlers.DeleteHolding)
 		api.GET("/portfolio/summary", handlers.GetPortfolioSummary)
 		api.GET("/portfolio/history", handlers.GetPortfolioHistory)
-
 	}
 
 	srv := &http.Server{
@@ -89,8 +111,7 @@ func main() {
 	<-quit
 	log.Println("Shutdown signal received. Releasing resources...")
 
-	// 1. Stop any active automation job first — releases the key-press loop cleanly
-	//    instead of leaving robotgo mid-keystroke or a goroutine dangling.
+	// 1. Stop active automation job
 	if services.Manager.IsActive() {
 		if err := services.Manager.StopJob(); err != nil {
 			log.Printf("Error stopping active job: %v", err)
@@ -99,14 +120,14 @@ func main() {
 		}
 	}
 
-	// 2. Stop accepting new HTTP requests, let in-flight ones finish (max 5s)
+	// 2. Stop accepting HTTP requests (max 5s timeout)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 
-	// 3. Close the DB connection pool last
+	// 3. Close the DB connection pool
 	if sqlDB, err := database.DB.DB(); err == nil {
 		sqlDB.Close()
 		log.Println("Database connection closed.")
@@ -114,3 +135,6 @@ func main() {
 
 	log.Println("Shutdown complete.")
 }
+
+//TODO: Put the API logs into a topic and the application logs into another topic, using wildcard binding strings.
+// TODO: Topic exchanges route dynamically based on routing keys containing dot-seperated words, allowing systems to selectively bind queues using wildcards

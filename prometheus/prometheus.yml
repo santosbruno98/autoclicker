@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: "vector"
+    static_configs:
+      # Use vector container name and port exposed by vector.yaml (9598)
+      - targets: ["vector:9598"]

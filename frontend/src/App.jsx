@@ -7,9 +7,10 @@ import WorkerLogPanel from './components/WorkerLogPanel';
 import TaskManager from './components/TaskManager';
 import NotesTab from './components/NotesTab';
 import PortfolioTab from './components/PortfolioTab';
+import KafkaLogsTab from './components/KafkaLogsTab';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('controller'); // 'controller' | 'notes' | 'portfolio'
+  const [activeTab, setActiveTab] = useState('controller'); // 'controller' | 'notes' | 'portfolio' | 'kafka'
 
   const [processes, setProcesses] = useState([]);
   const [tasks, setTasks] = useState([]);
@@ -159,12 +160,24 @@ export default function App() {
         >
           Portfolio
         </button>
+        <button
+          onClick={() => setActiveTab('kafka')}
+          className={`px-4 py-2 text-sm font-semibold border-b-2 -mb-px ${
+            activeTab === 'kafka'
+              ? 'border-blue-500 text-white'
+              : 'border-transparent text-slate-500 hover:text-slate-300'
+          }`}
+        >
+          Kafka UI
+        </button>
       </div>
 
       {activeTab === 'notes' ? (
         <NotesTab />
       ) : activeTab === 'portfolio' ? (
         <PortfolioTab />
+      ) : activeTab === 'kafka' ? (
+        <KafkaLogsTab />
       ) : (
         <>
           {/* Active status banner */}

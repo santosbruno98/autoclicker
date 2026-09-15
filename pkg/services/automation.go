@@ -3,16 +3,20 @@ package services
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-vgo/robotgo"
+	"github.com/segmentio/kafka-go"
 	"github.com/shirou/gopsutil/v4/process"
 
 	"autoclicker/pkg/database"
 	"autoclicker/pkg/models"
 )
+
+// Loging to Kafka
 
 const maxLogLines = 500
 
@@ -22,11 +26,20 @@ type JobManager struct {
 	active bool
 	status models.JobStatus
 
-	logsMu sync.Mutex
-	logs   []string
+	logsMu      sync.Mutex
+	logs        []string
+	kafkaWriter *kafka.Writer
 }
 
 var Manager = &JobManager{}
+
+func (m *JobManager) InitKafka(brokers []string, topic string) {
+	m.kafkaWriter = &kafka.Writer{
+		Addr:     kafka.TCP(brokers...),
+		Topic:    topic,
+		Balancer: &kafka.LeastBytes{},
+	}
+}
 
 func (m *JobManager) log(format string, args ...interface{}) {
 	line := fmt.Sprintf("[%s] %s", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
@@ -36,6 +49,17 @@ func (m *JobManager) log(format string, args ...interface{}) {
 		m.logs = m.logs[len(m.logs)-maxLogLines:]
 	}
 	m.logsMu.Unlock()
+
+	if m.kafkaWriter != nil {
+		go func(msg string) {
+			err := m.kafkaWriter.WriteMessages(context.Background(), kafka.Message{
+				Value: []byte(msg),
+			})
+			if err != nil {
+				log.Printf("Failed to write log message to Kafka: %v", err)
+			}
+		}(line)
+	}
 }
 
 func (m *JobManager) GetLogs() []string {

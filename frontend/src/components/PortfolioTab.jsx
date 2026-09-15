@@ -1,356 +1,257 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { ComposedChart, AreaChart, Area, Bar, Cell, ResponsiveContainer, YAxis, Tooltip } from 'recharts';
-import { createHolding, deleteHolding, fetchPortfolioSummary, fetchPortfolioHistory } from '../services/api';
+import React, { useState, useEffect } from 'react';
+import MarketHeatmap from './MarketHeatmap';
 
-function fmt(n, decimals = 2) {
-  if (n === undefined || n === null || Number.isNaN(n)) return '--';
-  return n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-}
-
-function fmtDate(d) {
-  if (!d) return '--';
-  return new Date(d).toLocaleDateString();
-}
-
-function GainCell({ value, isPct }) {
-  if (value === undefined || value === null) return <span className="text-slate-500">--</span>;
-  const positive = value >= 0;
-  const color = positive ? 'text-emerald-400' : 'text-rose-400';
-  const sign = positive ? '+' : '';
-  return <span className={color}>{sign}{fmt(value)}{isPct ? '%' : ''}</span>;
-}
-
-function SessionBadge({ session }) {
-  if (!session || session === 'regular') return null;
-  const label = session === 'post' ? 'AH' : 'PM';
-  return <span className="ml-1 text-[10px] px-1 py-0.5 rounded bg-slate-700 text-slate-300 align-middle">{label}</span>;
-}
-
-export default function PortfolioTab() {
+export const PortfolioTab = () => {
+  const [activeSubTab, setActiveSubTab] = useState('holdings');
+  const [holdings, setHoldings] = useState([]);
   const [summary, setSummary] = useState(null);
-  const [history, setHistory] = useState({ usd: [], eur: [] });
-  const [chartType, setChartType] = useState('line'); // 'line' | 'candle'
-  const [chartCurrency, setChartCurrency] = useState('usd'); // 'usd' | 'eur'
+  const [loading, setLoading] = useState(true);
 
+  // Form states for creating new holdings
   const [symbol, setSymbol] = useState('');
   const [shares, setShares] = useState('');
-  const [purchasePrice, setPurchasePrice] = useState('');
-  const [purchasePriceCurrency, setPurchasePriceCurrency] = useState('USD');
-  const [purchaseDate, setPurchaseDate] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState('');
+  const [avgCost, setAvgCost] = useState('');
 
-  const loadSummary = useCallback(async () => {
+  const fetchPortfolioData = async () => {
     try {
-      setSummary(await fetchPortfolioSummary());
-    } catch (err) {
-      console.error('Failed to load portfolio summary:', err);
-    }
-  }, []);
+      setLoading(true);
+      const [holdingsRes, summaryRes] = await Promise.all([
+        fetch('/api/v1/portfolio/holdings'),
+        fetch('/api/v1/portfolio/summary'),
+      ]);
 
-  const loadHistory = useCallback(async () => {
-    try {
-      const data = await fetchPortfolioHistory();
-      const mapSeries = (series) =>
-        (series || []).map((p) => ({
-          time: p.timestamp,
-          open: p.open,
-          high: p.high,
-          low: p.low,
-          close: p.close,
-          wick: [p.low, p.high],
-          body: [Math.min(p.open, p.close), Math.max(p.open, p.close)],
-          isUp: p.close >= p.open,
-        }));
-      setHistory({ usd: mapSeries(data.usd), eur: mapSeries(data.eur) });
+      if (holdingsRes.ok) {
+        const holdingsData = await holdingsRes.json();
+        // Fallback for API response structures (array or wrapped in object)
+        const items = Array.isArray(holdingsData)
+          ? holdingsData
+          : holdingsData?.data || holdingsData?.holdings || [];
+        setHoldings(items);
+      }
+      if (summaryRes.ok) {
+        const summaryData = await summaryRes.json();
+        setSummary(summaryData);
+      }
     } catch (err) {
-      console.error('Failed to load portfolio history:', err);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadSummary();
-    loadHistory();
-    const summaryInterval = setInterval(loadSummary, 15000);
-    const historyInterval = setInterval(loadHistory, 60000);
-    return () => {
-      clearInterval(summaryInterval);
-      clearInterval(historyInterval);
-    };
-  }, [loadSummary, loadHistory]);
-
-  const handleAdd = async (e) => {
-    e.preventDefault();
-    if (!symbol.trim() || !shares) return;
-    setIsSubmitting(true);
-    setError('');
-    try {
-      await createHolding({
-        symbol: symbol.trim().toUpperCase(),
-        shares: parseFloat(shares),
-        purchase_price: purchasePrice ? parseFloat(purchasePrice) : 0,
-        purchase_price_currency: purchasePriceCurrency,
-        purchase_date: purchaseDate ? new Date(purchaseDate).toISOString() : null,
-      });
-      setSymbol('');
-      setShares('');
-      setPurchasePrice('');
-      setPurchaseDate('');
-      loadSummary();
-      loadHistory();
-    } catch (err) {
-      setError('Failed to add holding — check the symbol and try again.');
+      console.error('Failed to fetch portfolio data:', err);
     } finally {
-      setIsSubmitting(false);
+      setLoading(false);
     }
   };
 
-  const handleDelete = async (id) => {
+  useEffect(() => {
+    fetchPortfolioData();
+  }, []);
+
+  const handleCreateHolding = async (e) => {
+    e.preventDefault();
+    if (!symbol || !shares || !avgCost) return;
+
     try {
-      await deleteHolding(id);
-      loadSummary();
-      loadHistory();
+      const res = await fetch('/api/v1/portfolio/holdings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbol: symbol.toUpperCase(),
+          shares: parseFloat(shares),
+          avg_cost: parseFloat(avgCost),
+        }),
+      });
+
+      if (res.ok) {
+        setSymbol('');
+        setShares('');
+        setAvgCost('');
+        fetchPortfolioData();
+      }
+    } catch (err) {
+      console.error('Failed to create holding:', err);
+    }
+  };
+
+  const handleDeleteHolding = async (id) => {
+    try {
+      const res = await fetch(`/api/v1/portfolio/holdings/${id}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        fetchPortfolioData();
+      }
     } catch (err) {
       console.error('Failed to delete holding:', err);
     }
   };
 
-  const dayPositive = (summary?.day_change_abs_usd ?? 0) >= 0;
-  const lineColor = dayPositive ? '#3DDC84' : '#FF4D4D';
-  const chartData = history[chartCurrency];
-  const currencySymbol = chartCurrency === 'usd' ? '$' : '€';
-
-  const CandleTooltip = ({ active, payload }) => {
-    if (!active || !payload || !payload.length) return null;
-    const d = payload[0].payload;
-    return (
-      <div className="bg-housing border border-slate-700 rounded px-3 py-2 text-xs font-mono">
-        <div className="text-slate-400 mb-1">{new Date(d.time * 1000).toLocaleTimeString()}</div>
-        <div>O: {currencySymbol}{fmt(d.open)}</div>
-        <div>H: {currencySymbol}{fmt(d.high)}</div>
-        <div>L: {currencySymbol}{fmt(d.low)}</div>
-        <div>C: {currencySymbol}{fmt(d.close)}</div>
-      </div>
-    );
-  };
-
   return (
-    <div className="flex flex-col gap-4">
-      {/* Hero: value + intraday chart, in USD and EUR */}
-      <div className="bg-slate-900 border border-slate-800 rounded p-6">
-        <div className="text-sm text-slate-400 mb-1">Portfolio Value</div>
-        <div className="flex items-baseline gap-4 mb-1">
-          <div className="text-4xl font-bold text-white">
-            {summary ? `$${fmt(summary.total_value_usd)}` : '--'}
-          </div>
-          <div className="text-xl font-semibold text-slate-400">
-            {summary ? `€${fmt(summary.total_value_eur)}` : '--'}
-          </div>
-        </div>
-        {summary && (
-          <div className={`text-sm font-mono ${dayPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {dayPositive ? '▲' : '▼'} ${fmt(Math.abs(summary.day_change_abs_usd))} / €{fmt(Math.abs(summary.day_change_abs_eur))} ({fmt(Math.abs(summary.day_change_pct))}%) Today
-          </div>
-        )}
+    <div className="p-6 space-y-6 bg-gray-900 text-white min-h-screen">
+      {/* Subtab Navigation */}
+      <div className="flex space-x-4 border-b border-gray-700 pb-2">
+        <button
+          onClick={() => setActiveSubTab('holdings')}
+          className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            activeSubTab === 'holdings'
+              ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+          }`}
+        >
+          Holdings
+        </button>
+        <button
+          onClick={() => setActiveSubTab('summary')}
+          className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            activeSubTab === 'summary'
+              ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+          }`}
+        >
+          Summary
+        </button>
+        <button
+          onClick={() => setActiveSubTab('heatmap')}
+          className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
+            activeSubTab === 'heatmap'
+              ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
+              : 'text-gray-400 hover:text-white'
+          }`}
+        >
+          Market Heatmap
+        </button>
+      </div>
 
-        {/* Chart controls */}
-        <div className="flex gap-4 mt-4">
-          <div className="flex gap-1 text-xs">
-            {['line', 'candle'].map((t) => (
-              <button
-                key={t}
-                onClick={() => setChartType(t)}
-                className={`px-2 py-1 rounded font-semibold capitalize ${
-                  chartType === t ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-          <div className="flex gap-1 text-xs">
-            {['usd', 'eur'].map((c) => (
-              <button
-                key={c}
-                onClick={() => setChartCurrency(c)}
-                className={`px-2 py-1 rounded font-semibold uppercase ${
-                  chartCurrency === c ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-        </div>
+      {/* Holdings Subtab */}
+      {activeSubTab === 'holdings' && (
+        <div className="space-y-6">
+          <form
+            onSubmit={handleCreateHolding}
+            className="bg-gray-800 p-4 rounded-lg flex flex-wrap items-end gap-4 border border-gray-700"
+          >
+            <div>
+              <label className="block text-xs font-semibold text-gray-400 mb-1">
+                Ticker Symbol
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. AMD"
+                value={symbol}
+                onChange={(e) => setSymbol(e.target.value)}
+                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-400 mb-1">
+                Shares
+              </label>
+              <input
+                type="number"
+                step="any"
+                placeholder="0"
+                value={shares}
+                onChange={(e) => setShares(e.target.value)}
+                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-gray-400 mb-1">
+                Avg Cost ($)
+              </label>
+              <input
+                type="number"
+                step="any"
+                placeholder="0.00"
+                value={avgCost}
+                onChange={(e) => setAvgCost(e.target.value)}
+                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <button
+              type="submit"
+              className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-semibold transition"
+            >
+              Add Holding
+            </button>
+          </form>
 
-        <div className="h-56 mt-4 -mx-2">
-          {chartData.length > 1 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              {chartType === 'line' ? (
-                <AreaChart data={chartData}>
-                  <defs>
-                    <linearGradient id="portfolioFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={lineColor} stopOpacity={0.35} />
-                      <stop offset="100%" stopColor={lineColor} stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <YAxis domain={['auto', 'auto']} hide />
-                  <Tooltip
-                    contentStyle={{ background: '#0B0D0F', border: '1px solid #2A2F35', borderRadius: 6 }}
-                    labelFormatter={(t) => new Date(t * 1000).toLocaleTimeString()}
-                    formatter={(v) => [`${currencySymbol}${fmt(v)}`, 'Value']}
-                  />
-                  <Area type="monotone" dataKey="close" stroke={lineColor} strokeWidth={2} fill="url(#portfolioFill)" />
-                </AreaChart>
-              ) : (
-                <ComposedChart data={chartData}>
-                  <YAxis domain={['auto', 'auto']} hide />
-                  <Tooltip content={<CandleTooltip />} />
-                  <Bar dataKey="wick" barSize={1} fill="#8A9099" isAnimationActive={false} />
-                  <Bar dataKey="body" barSize={6} isAnimationActive={false}>
-                    {chartData.map((d, i) => (
-                      <Cell key={i} fill={d.isUp ? '#3DDC84' : '#FF4D4D'} />
-                    ))}
-                  </Bar>
-                </ComposedChart>
-              )}
-            </ResponsiveContainer>
+          {loading ? (
+            <div className="text-gray-400">Loading holdings...</div>
           ) : (
-            <div className="h-full flex items-center justify-center text-slate-600 text-sm italic">
-              Not enough intraday data yet — add holdings to see the chart.
+            <div className="overflow-x-auto bg-gray-800 rounded-lg border border-gray-700">
+              <table className="w-full text-left text-sm text-gray-300">
+                <thead className="bg-gray-700 text-gray-400 uppercase text-xs">
+                  <tr>
+                    <th className="px-6 py-3">Symbol</th>
+                    <th className="px-6 py-3">Shares</th>
+                    <th className="px-6 py-3">Avg Cost</th>
+                    <th className="px-6 py-3">Total Cost</th>
+                    <th className="px-6 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-700">
+                  {holdings.length === 0 ? (
+                    <tr>
+                      <td colSpan="5" className="px-6 py-4 text-center text-gray-500">
+                        No holdings found.
+                      </td>
+                    </tr>
+                  ) : (
+                    holdings.map((item) => (
+                      <tr key={item.id || item.symbol} className="hover:bg-gray-750">
+                        <td className="px-6 py-4 font-bold text-white">
+                          {item.symbol}
+                        </td>
+                        <td className="px-6 py-4">{item.shares}</td>
+                        <td className="px-6 py-4">
+                          ${typeof item.avg_cost === 'number' ? item.avg_cost.toFixed(2) : item.avg_cost}
+                        </td>
+                        <td className="px-6 py-4">
+                          ${(item.shares * item.avg_cost)?.toFixed(2)}
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <button
+                            onClick={() => handleDeleteHolding(item.id)}
+                            className="text-red-400 hover:text-red-300 font-medium"
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
-      </div>
+      )}
 
-      {/* Add holding */}
-      <div className="bg-slate-900 p-4 rounded border border-slate-800">
-        <h3 className="text-md font-bold text-slate-100 mb-3">Add Holding</h3>
-        <form onSubmit={handleAdd} className="grid grid-cols-1 md:grid-cols-6 gap-2">
-          <input
-            type="text"
-            placeholder="Symbol (e.g. AAPL)"
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100"
-            required
-          />
-          <input
-            type="number"
-            step="0.0001"
-            placeholder="Shares"
-            value={shares}
-            onChange={(e) => setShares(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100"
-            required
-          />
-          <input
-            type="number"
-            step="0.01"
-            placeholder="Price paid per share"
-            value={purchasePrice}
-            onChange={(e) => setPurchasePrice(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100"
-          />
-          <select
-            value={purchasePriceCurrency}
-            onChange={(e) => setPurchasePriceCurrency(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100"
-          >
-            <option value="USD">USD ($)</option>
-            <option value="EUR">EUR (€)</option>
-          </select>
-          <input
-            type="date"
-            value={purchaseDate}
-            onChange={(e) => setPurchaseDate(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100"
-            title="Purchase date (optional)"
-          />
-          <button
-            type="submit"
-            disabled={isSubmitting}
-            className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded px-3 py-1 text-sm font-semibold"
-          >
-            {isSubmitting ? 'Adding...' : 'Add Holding'}
-          </button>
-        </form>
-        {error && <div className="text-rose-400 text-xs mt-2">{error}</div>}
-      </div>
-
-      {/* Holdings table */}
-      <div className="bg-slate-900 p-4 rounded border border-slate-800">
-        <h3 className="text-md font-bold text-slate-100 mb-3">Holdings</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs text-slate-400 min-w-[1200px]">
-            <thead className="bg-slate-800 text-slate-300">
-              <tr>
-                <th className="p-2">Symbol</th>
-                <th className="p-2 text-right">Shares</th>
-                <th className="p-2 text-right">Purchased</th>
-                <th className="p-2 text-right">Avg Cost/Share (USD / EUR)</th>
-                <th className="p-2 text-right">Last Price (USD / EUR)</th>
-                <th className="p-2 text-right">Market Value (USD / EUR)</th>
-                <th className="p-2 text-right">Day Gain %</th>
-                <th className="p-2 text-right">Day Gain (USD / EUR)</th>
-                <th className="p-2 text-right">Total Gain %</th>
-                <th className="p-2 text-right">Total Gain (USD / EUR)</th>
-                <th className="p-2 text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(summary?.holdings || []).map((h) => (
-                <tr key={h.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
-                  <td className="p-2 font-bold text-slate-100">{h.symbol}</td>
-                  <td className="p-2 text-right font-mono">{fmt(h.shares, 4)}</td>
-                  <td className="p-2 text-right font-mono">{fmtDate(h.purchase_date)}</td>
-                  <td className="p-2 text-right font-mono">
-                    {h.avg_cost_share_usd
-                      ? <>${fmt(h.avg_cost_share_usd)} <span className="text-slate-500">/ €{fmt(h.avg_cost_share_eur)}</span></>
-                      : '--'}
-                  </td>
-                  <td className="p-2 text-right font-mono">
-                    {h.quote_error ? (
-                      <span className="text-rose-500 italic">error</span>
-                    ) : (
-                      <>
-                        ${fmt(h.last_price_usd)} <span className="text-slate-500">/ €{fmt(h.last_price_eur)}</span>
-                        <SessionBadge session={h.market_session} />
-                      </>
-                    )}
-                  </td>
-                  <td className="p-2 text-right font-mono">
-                    ${fmt(h.market_value_usd)} <span className="text-slate-500">/ €{fmt(h.market_value_eur)}</span>
-                  </td>
-                  <td className="p-2 text-right font-mono"><GainCell value={h.day_gain_pct} isPct /></td>
-                  <td className="p-2 text-right font-mono">
-                    <GainCell value={h.day_gain_abs_usd} /> <span className="text-slate-600">/</span> <GainCell value={h.day_gain_abs_eur} />
-                  </td>
-                  <td className="p-2 text-right font-mono"><GainCell value={h.total_gain_pct} isPct /></td>
-                  <td className="p-2 text-right font-mono">
-                    <GainCell value={h.total_gain_abs_usd} /> <span className="text-slate-600">/</span> <GainCell value={h.total_gain_abs_eur} />
-                  </td>
-                  <td className="p-2 text-right">
-                    <button onClick={() => handleDelete(h.id)} className="text-red-400 hover:text-red-300 font-semibold">
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {(!summary || summary.holdings.length === 0) && (
-                <tr>
-                  <td colSpan="11" className="p-2 text-center text-slate-500 italic">
-                    No holdings yet. Add one above.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+      {/* Summary Subtab */}
+      {activeSubTab === 'summary' && (
+        <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 space-y-4">
+          <h2 className="text-lg font-bold text-white">Portfolio Overview</h2>
+          {summary ? (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-xs text-gray-400">Total Invested</div>
+                <div className="text-xl font-bold text-green-400">
+                  ${summary.total_invested?.toFixed(2) || '0.00'}
+                </div>
+              </div>
+              <div className="bg-gray-700 p-4 rounded-lg">
+                <div className="text-xs text-gray-400">Total Holdings Count</div>
+                <div className="text-xl font-bold text-blue-400">
+                  {summary.total_positions || holdings.length}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-gray-400">No summary metrics available.</div>
+          )}
         </div>
-        <p className="text-[11px] text-slate-600 mt-2">
-          "AH"/"PM" badges indicate the last price shown is from after-hours or pre-market trading. Dividend income and realized gains aren't tracked yet.
-        </p>
-      </div>
+      )}
+
+      {/* Market Heatmap Subtab */}
+      {activeSubTab === 'heatmap' && <MarketHeatmap />}
     </div>
   );
-}
+};
+
+export default PortfolioTab;
