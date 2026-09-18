@@ -20,7 +20,7 @@ services:
       dockerfile: Dockerfile
     container_name: autoclicker_frontend
     ports:
-      - "8080:80"
+      - "80:80"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: always
@@ -93,7 +93,7 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
+      - "--config.file=/etc/prometheus/prometheus.yml"
     depends_on:
       - vector
     
@@ -104,6 +104,8 @@ services:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
     depends_on:
       - loki
       - prometheus

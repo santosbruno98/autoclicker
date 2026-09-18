@@ -5,6 +5,7 @@ import (
 	"autoclicker/pkg/models"
 	"autoclicker/pkg/services"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"sync"
@@ -24,6 +25,7 @@ func GetHoldings(c *gin.Context) {
 func CreateHolding(c *gin.Context) {
 	var holding models.Holding
 	if err := c.ShouldBindJSON(&holding); err != nil {
+		log.Printf("CreateHolding JSON binding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

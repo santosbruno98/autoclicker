@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const API = axios.create({
-  baseURL: 'http://localhost:8080/api/v1',
+  baseURL: '/api/v1',
 });
 
 // Process APIs
@@ -39,3 +39,14 @@ export const updateHolding = async (id, payload) => (await API.put(`/portfolio/h
 export const deleteHolding = async (id) => (await API.delete(`/portfolio/holdings/${id}`)).data;
 export const fetchPortfolioSummary = async () => (await API.get('/portfolio/summary')).data;
 export const fetchPortfolioHistory = async () => (await API.get('/portfolio/history')).data;
+
+// Alerts APIs
+export const fetchThresholds = async () => (await API.get('/portfolio/thresholds')).data;
+
+export const fetchThreshold = async (id) => (await API.get(`/portfolio/thresholds/${id}`)).data;
+
+export const createThreshold = async (payload) => (await API.post('/portfolio/thresholds', payload)).data;
+
+export const updateThreshold = async (id, payload) => (await API.put(`/portfolio/thresholds/${id}`, payload)).data;
+
+export const deleteThreshold = async (id) => (await API.delete(`/portfolio/thresholds/${id}`)).data;

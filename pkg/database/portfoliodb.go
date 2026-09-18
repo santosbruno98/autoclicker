@@ -19,7 +19,10 @@ func InitPortfolioDB() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	if err := PortfolioDB.AutoMigrate(&models.Holding{}); err != nil {
+	if err := PortfolioDB.AutoMigrate(
+		&models.Holding{},
+		&models.PriceThreshold{},
+	); err != nil {
 		log.Fatalf("Failed to migrate database: %v", err)
 	}
 	log.Println("Portfolio database connected")

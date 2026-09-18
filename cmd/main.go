@@ -92,10 +92,23 @@ func main() {
 		api.DELETE("/portfolio/holdings/:id", handlers.DeleteHolding)
 		api.GET("/portfolio/summary", handlers.GetPortfolioSummary)
 		api.GET("/portfolio/history", handlers.GetPortfolioHistory)
-	}
 
+		// Threshold APIs
+		api.GET("/portfolio/thresholds", handlers.GetPriceThresholds)
+		api.GET("/portfolio/thresholds/:id", handlers.GetPriceThreshold)
+		api.POST("/portfolio/thresholds", handlers.CreatePriceThreshold)
+		api.PUT("/portfolio/thresholds/:id", handlers.UpdatePriceThreshold)
+		api.DELETE("/portfolio/thresholds/:id", handlers.DeleteThreshold)
+
+		api.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
+		
+	}
+	
+	r.GET("/metrics", handlers.GetPrometheusMetrics)
+	
+	
 	srv := &http.Server{
-		Addr:    ":8080",
+		Addr:    "0.0.0.0:8080",
 		Handler: r,
 	}
 
