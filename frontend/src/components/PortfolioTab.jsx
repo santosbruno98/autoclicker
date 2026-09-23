@@ -542,3 +542,5 @@ export const PortfolioTab = () => {
 };
 
 export default PortfolioTab;
+
+//TODO: ADD THE BUYING POWER, AKA MONEY LEFT TO USE FOR BUYING

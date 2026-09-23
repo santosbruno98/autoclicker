@@ -14,6 +14,7 @@ services:
       - ./initdb/schema.sql:/docker-entrypoint-initdb.d/schema.sql
       - mysql_data:/var/lib/mysql
 
+  # Need another postgres contianer for the risk engine service
   frontend_app:
     build:
       context: ./frontend
