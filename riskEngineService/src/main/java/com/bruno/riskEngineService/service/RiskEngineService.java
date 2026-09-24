@@ -49,8 +49,8 @@ public class RiskEngineService {
     }
 
     private void updatePortfolioPosition(String symbol, double quantity, double price, Instant timestamp) {
-        // TODO: Update portfolio position
-        // Connect to the autoclicker database and update the portfolio position
+        // TODO: Update portfolio position 
+        // Connect to the portfolio database and update the portfolio position
         log.info("Updating portfolio position for {} @ {}", symbol, price);
     }
 }

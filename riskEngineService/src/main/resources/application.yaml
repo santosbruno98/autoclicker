@@ -2,7 +2,7 @@ spring:
   application:
     name: riskEngineService
 
-# Database Setup
+# Database Setup TODO: not sure if i need this db, maybe i should use the mysql db which contains the portfolio data
 datasource:
   url: jdbc:postgresql://localhost:5432/risk_engine_db
   username: postgres
@@ -31,4 +31,3 @@ datasource:
         acknowledge-mode: auto
         concurrency: 3
         max-concurrency: 10
-        
