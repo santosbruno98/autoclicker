@@ -29,44 +29,33 @@ services:
       timeout: 5s
       retries: 5
 
-  go-engine:
-    build:
-      context: .
-      dockerfile: Dockerfile.go
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    env_file:
-      - .env
+  # go-engine:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.go
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     rabbitmq:
+  #       condition: service_healthy
+  #   env_file:
+  #     - .env
 
-  java-risk-engine:
-    build:
-      context: .
-      dockerfile: Dockerfile.java
-    depends_on:
-      postgres:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    env_file:
-      - .env
-
-  db:
-    image: mysql:8.0
-    container_name: autoclicker_db
-    restart: always
-    environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
-    ports:
-      - "3306:3306"
-    volumes:
-      - ./initdb/schema.sql:/docker-entrypoint-initdb.d/schema.sql
-      - mysql_data:/var/lib/mysql
+# 
+  # db:
+  #   image: mysql:8.0
+  #   container_name: autoclicker_db
+  #   restart: always
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+  #     MYSQL_DATABASE: ${MYSQL_DATABASE}
+  #     MYSQL_USER: ${MYSQL_USER}
+  #     MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+  #   ports:
+  #     - "3306:3306"
+  #   volumes:
+  #     - ./initdb/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+  #     - mysql_data:/var/lib/mysql
 
   # Need another postgres contianer for the risk engine service
   frontend_app:
@@ -80,7 +69,7 @@ services:
       - "host.docker.internal:host-gateway"
     restart: always
     depends_on:
-      - db
+      - postgres
 
   kafka:
     image: apache/kafka:latest

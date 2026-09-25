@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"gorm.io/gorm"
 
 	"autoclicker/internal/middleware"
 	"autoclicker/pkg/database"
@@ -58,7 +59,7 @@ func main() {
 		}
 	}()
 
-	database.InitPortfolioDB()
+	// database.InitPostgresDB()
 	database.InitDB()
 	database.InitNotesDB()
 	database.InitPortfolioDB()
@@ -93,6 +94,8 @@ func main() {
 		api.DELETE("/portfolio/holdings/:id", handlers.DeleteHolding)
 		api.GET("/portfolio/summary", handlers.GetPortfolioSummary)
 		api.GET("/portfolio/history", handlers.GetPortfolioHistory)
+		api.GET("/portfolio/buyingPower", handlers.GetBuyingPower)
+		api.PUT("/portfolio/buyingPower", handlers.UpdateBuyingPower)
 
 		// Threshold APIs
 		api.GET("/portfolio/thresholds", handlers.GetPriceThresholds)
@@ -102,12 +105,11 @@ func main() {
 		api.DELETE("/portfolio/thresholds/:id", handlers.DeleteThreshold)
 
 		api.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
-		
+
 	}
-	
+
 	r.GET("/metrics", handlers.GetPrometheusMetrics)
-	
-	
+
 	srv := &http.Server{
 		Addr:    "0.0.0.0:8080",
 		Handler: r,
@@ -142,13 +144,19 @@ func main() {
 	}
 
 	// 3. Close the DB connection pool
-	if sqlDB, err := database.DB.DB(); err == nil {
-		sqlDB.Close()
-		log.Println("Database connection closed.")
+	closeDB := func(name string, db *gorm.DB) {
+		if db != nil {
+			if sqlDB, err := db.DB(); err == nil {
+				sqlDB.Close()
+				log.Printf("Database connection closed for %s", name)
+			}
+		}
 	}
-
 	log.Println("Shutdown complete.")
-}
+	closeDB("portfolioDB", database.PortfolioDB)
+	closeDB("notesDB", database.NotesDB)
+	closeDB("autoclicker", database.DB)
 
-//TODO: Put the API logs into a topic and the application logs into another topic, using wildcard binding strings.
-// TODO: Topic exchanges route dynamically based on routing keys containing dot-seperated words, allowing systems to selectively bind queues using wildcards
+	//TODO: Put the API logs into a topic and the application logs into another topic, using wildcard binding strings.
+	// TODO: Topic exchanges route dynamically based on routing keys containing dot-seperated words, allowing systems to selectively bind queues using wildcards
+}

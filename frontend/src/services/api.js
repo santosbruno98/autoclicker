@@ -3,7 +3,6 @@ import axios from 'axios';
 const API = axios.create({
   baseURL: '/api/v1',
 });
-
 // Process APIs
 export const fetchProcesses = async (nameQuery = '') => {
   const url = nameQuery ? `/processes?name=${encodeURIComponent(nameQuery)}` : '/processes';
@@ -39,6 +38,9 @@ export const updateHolding = async (id, payload) => (await API.put(`/portfolio/h
 export const deleteHolding = async (id) => (await API.delete(`/portfolio/holdings/${id}`)).data;
 export const fetchPortfolioSummary = async () => (await API.get('/portfolio/summary')).data;
 export const fetchPortfolioHistory = async () => (await API.get('/portfolio/history')).data;
+export const fetchBuyingPower = async () => (await API.get('/portfolio/buyingPower')).data;
+export const updateBuyingPower = async (buyingPower) => (await API.put('/portfolio/buyingPower', { buying_power: parseFloat(buyingPower) })).data;
+
 
 // Alerts APIs
 export const fetchThresholds = async () => (await API.get('/portfolio/thresholds')).data;
@@ -50,3 +52,4 @@ export const createThreshold = async (payload) => (await API.post('/portfolio/th
 export const updateThreshold = async (id, payload) => (await API.put(`/portfolio/thresholds/${id}`, payload)).data;
 
 export const deleteThreshold = async (id) => (await API.delete(`/portfolio/thresholds/${id}`)).data;
+

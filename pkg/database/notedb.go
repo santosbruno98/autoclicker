@@ -3,24 +3,25 @@ package database
 import (
 	"log"
 
-	"gorm.io/gorm"
-
 	"autoclicker/pkg/models"
+
+	"gorm.io/gorm"
 )
 
 var NotesDB *gorm.DB
 
 func InitNotesDB() {
-	if PostgresDB == nil {
-		InitPostgresDB()
+	var err error
+	dbName := "notes_db"
+	NotesDB, err = ConnectPostgresDB(dbName)
+	if err != nil {
+		log.Fatalf("Failed to connect to Postgres: %v", err)
 	}
-	NotesDB = PostgresDB
-
-	// NotesDB, err = gorm.Open(sqlite.Open("notes.db"), &gorm.Config{})
 
 	if err := NotesDB.AutoMigrate(&models.Note{}); err != nil {
-		log.Fatalf("Failed to migrate database: %v", err)
+		log.Fatalf("Failed to migrate notes tables: %v", err)
 	}
 
-	log.Println("Notes database connected")
+	log.Printf("Sucessefully connected to database -> %s", dbName)
+
 }

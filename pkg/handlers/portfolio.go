@@ -75,6 +75,7 @@ func DeleteHolding(c *gin.Context) {
 
 func GetPortfolioSummary(c *gin.Context) {
 	var holdings []models.Holding
+	var settings models.PortfolioSettings
 	if err := database.PortfolioDB.Order("symbol asc").Find(&holdings).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -114,6 +115,7 @@ func GetPortfolioSummary(c *gin.Context) {
 		summary.TotalGainAbsEUR += hq.TotalGainAbsEUR
 		summary.TotalGainAbsUSD += hq.TotalGainAbsUSD
 		totalCostUSD += hq.TotalCostUSD
+		
 	}
 
 	prevTotalUSD := summary.TotalValueUSD - summary.DayChangeAbsUSD
@@ -123,6 +125,9 @@ func GetPortfolioSummary(c *gin.Context) {
 	if totalCostUSD > 0 {
 		summary.TotalGainPercent = summary.TotalGainAbsUSD / totalCostUSD * 100
 	}
+
+	database.PortfolioDB.FirstOrCreate(&settings, models.PortfolioSettings{ID: 1})
+	summary.BuyingPower = settings.BuyingPower
 
 	c.JSON(http.StatusOK, summary)
 }
@@ -268,7 +273,10 @@ func GetPortfolioHistory(c *gin.Context) {
 	for i := 0; i < minLen; i++ {
 		var oU, hU, lU, cU, oE, hE, lE, cE float64
 		for _, s := range all {
-			p := s.points[i]
+			// Offset index from the end to align recent timestamps
+			offset := len(s.points) - minLen + i
+			p := s.points[offset]
+
 			oU += p.Open * s.shares * s.usdRate
 			hU += p.High * s.shares * s.usdRate
 			lU += p.Low * s.shares * s.usdRate
@@ -278,10 +286,44 @@ func GetPortfolioHistory(c *gin.Context) {
 			lE += p.Low * s.shares * s.eurRate
 			cE += p.Close * s.shares * s.eurRate
 		}
-		ts := all[0].points[i].Timestamp
+		ts := all[0].points[len(all[0].points)-minLen+i].Timestamp
 		usdPoints[i] = models.PortfolioPoint{Timestamp: ts, Open: oU, High: hU, Low: lU, Close: cU}
 		eurPoints[i] = models.PortfolioPoint{Timestamp: ts, Open: oE, High: hE, Low: lE, Close: cE}
 	}
 
 	c.JSON(http.StatusOK, models.PortfolioHistory{USD: usdPoints, EUR: eurPoints})
 }
+
+
+// GetBuyingPower handles GET /api/portfolio/buying-power
+func GetBuyingPower(c *gin.Context) {
+	var settings models.PortfolioSettings
+	if err := database.PortfolioDB.FirstOrCreate(&settings, models.PortfolioSettings{ID: 1}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, settings)
+}
+
+// UpdateBuyingPower handles PUT /api/portfolio/buying-power
+func UpdateBuyingPower(c *gin.Context) {
+	var req struct {
+		BuyingPower float64 `json:"buying_power"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var settings models.PortfolioSettings
+	database.PortfolioDB.FirstOrCreate(&settings, models.PortfolioSettings{ID: 1})
+	settings.BuyingPower = req.BuyingPower
+
+	if err := database.PortfolioDB.Save(&settings).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, settings)
+}
+

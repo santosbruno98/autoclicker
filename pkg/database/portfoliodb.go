@@ -3,31 +3,28 @@ package database
 import (
 	"log"
 
-	// "github.com/glebarez/sqlite"
-	"gorm.io/gorm"
-
 	"autoclicker/pkg/models"
+
+	"gorm.io/gorm"
 )
 
 var PortfolioDB *gorm.DB
 
 func InitPortfolioDB() {
-	// var err error
-	if PostgresDB == nil {
-		InitPostgresDB()
+	var err error
+	dbName := "portfolio_db"
+	PortfolioDB, err = ConnectPostgresDB(dbName)
+	if err != nil {
+		log.Fatalf("Failed to connect to Postgres: %v", err)
 	}
-
-	PortfolioDB = PostgresDB  
-	// PortfolioDB, err = gorm.Open(sqlite.Open("portfolio.db"), &gorm.Config{})
-	// if err != nil {
-	// 	log.Fatalf("Failed to connect to database: %v", err)
-	// }
 
 	if err := PortfolioDB.AutoMigrate(
 		&models.Holding{},
 		&models.PriceThreshold{},
+		&models.PortfolioSettings{},
 	); err != nil {
-		log.Fatalf("Failed to migrate database: %v", err)
+		log.Fatalf("Failed to migrate portfolio tables: %v", err)
 	}
-	log.Println("Portfolio database connected")
+
+	log.Printf("Sucessefully connected to database -> %s", dbName)
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { MarketHeatmap } from './MarketHeatmap';
 import {
   fetchPortfolioSummary,
@@ -9,6 +9,8 @@ import {
   createThreshold,
   updateThreshold,
   deleteThreshold,
+  fetchBuyingPower,
+  updateBuyingPower,
 } from '../services/api';
 
 function fmt(n, decimals = 2) {
@@ -18,15 +20,26 @@ function fmt(n, decimals = 2) {
 
 function fmtDate(d) {
   if (!d) return '';
-  return new Date(d).toISOString().slice(0, 10); // yyyy-mm-dd for <input type="date">
+  return new Date(d).toISOString().slice(0, 10);
 }
 
-function GainText({ value, isPct }) {
-  if (value === undefined || value === null) return <span className="text-gray-500">--</span>;
-  const positive = value >= 0;
+function GainDisplay({ absValue, pctValue, prefix = '$' }) {
+  if (absValue === undefined && pctValue === undefined) return <span className="text-gray-500">--</span>;
+  
+  const positive = (absValue ?? pctValue ?? 0) >= 0;
   const color = positive ? 'text-green-400' : 'text-red-400';
   const sign = positive ? '+' : '';
-  return <span className={color}>{sign}{fmt(value)}{isPct ? '%' : ''}</span>;
+
+  return (
+    <div className={`flex flex-col ${color}`}>
+      <span className="font-semibold">
+        {sign}{prefix}{fmt(Math.abs(absValue ?? 0))}
+      </span>
+      <span className="text-xs opacity-80">
+        {sign}{fmt(pctValue)}%
+      </span>
+    </div>
+  );
 }
 
 export const PortfolioTab = () => {
@@ -35,8 +48,17 @@ export const PortfolioTab = () => {
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState('');
 
+  // Buying Power state
+  const [buyingPower, setBuyingPower] = useState(0);
+  const [isEditingBuyingPower, setIsEditingBuyingPower] = useState(false);
+  const [buyingPowerInput, setBuyingPowerInput] = useState('');
+
+  // Table Sorting State
+  const [sortField, setSortField] = useState('market_value_usd');
+  const [sortDirection, setSortDirection] = useState('desc');
+
   // Add/Edit holding form state
-  const [editingId, setEditingId] = useState(null); // null = "add" mode, otherwise editing this holding's id
+  const [editingId, setEditingId] = useState(null);
   const [symbol, setSymbol] = useState('');
   const [shares, setShares] = useState('');
   const [purchasePrice, setPurchasePrice] = useState('');
@@ -44,7 +66,7 @@ export const PortfolioTab = () => {
   const [purchaseDate, setPurchaseDate] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Alerts (price thresholds)
+  // Alerts
   const [thresholds, setThresholds] = useState([]);
   const [alertSymbol, setAlertSymbol] = useState('');
   const [alertCondition, setAlertCondition] = useState('above');
@@ -56,8 +78,14 @@ export const PortfolioTab = () => {
     try {
       setLoading(true);
       setErrorMessage('');
-      const data = await fetchPortfolioSummary();
+      const [data, bpData] = await Promise.all([
+        fetchPortfolioSummary(),
+        fetchBuyingPower().catch(() => ({ buying_power: 0 })),
+      ]);
       setSummary(data);
+      if (bpData && bpData.buying_power !== undefined) {
+        setBuyingPower(bpData.buying_power);
+      }
     } catch (err) {
       console.error('Failed to fetch portfolio data:', err);
       setErrorMessage('Failed to connect to backend service.');
@@ -81,6 +109,71 @@ export const PortfolioTab = () => {
     const interval = setInterval(fetchPortfolioData, 15000);
     return () => clearInterval(interval);
   }, [fetchPortfolioData, loadThresholds]);
+
+  const handleSaveBuyingPower = async () => {
+    try {
+      const updated = await updateBuyingPower(buyingPowerInput);
+      setBuyingPower(updated.buying_power);
+      setIsEditingBuyingPower(false);
+    } catch (err) {
+      console.error('Failed to update buying power:', err);
+      setErrorMessage('Failed to update buying power');
+    }
+  };
+
+  const handleSort = (field) => {
+    if (sortField === field) {
+      setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDirection('desc');
+    }
+  };
+
+  const sortedHoldings = useMemo(() => {
+    if (!summary?.holdings) return [];
+    return [...summary.holdings].sort((a, b) => {
+      let valA, valB;
+      switch (sortField) {
+        case 'symbol':
+          valA = a.symbol;
+          valB = b.symbol;
+          break;
+        case 'shares':
+          valA = a.shares;
+          valB = b.shares;
+          break;
+        case 'avg_cost':
+          valA = a.avg_cost_share_usd || 0;
+          valB = b.avg_cost_share_usd || 0;
+          break;
+        case 'last_price':
+          valA = a.last_price_usd || 0;
+          valB = b.last_price_usd || 0;
+          break;
+        case 'market_value':
+          valA = a.market_value_usd || 0;
+          valB = b.market_value_usd || 0;
+          break;
+        case 'day_gain':
+          valA = a.day_gain_abs_usd || 0;
+          valB = b.day_gain_abs_usd || 0;
+          break;
+        case 'total_gain':
+          valA = a.total_gain_abs_usd || 0;
+          valB = b.total_gain_abs_usd || 0;
+          break;
+        default:
+          valA = a.market_value_usd || 0;
+          valB = b.market_value_usd || 0;
+      }
+
+      if (typeof valA === 'string') {
+        return sortDirection === 'asc' ? valA.localeCompare(valB) : valB.localeCompare(valA);
+      }
+      return sortDirection === 'asc' ? valA - valB : valB - valA;
+    });
+  }, [summary, sortField, sortDirection]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -124,7 +217,7 @@ export const PortfolioTab = () => {
       fetchPortfolioData();
     } catch (err) {
       console.error('Failed to save holding:', err);
-      setErrorMessage(editingId ? 'Failed to update holding.' : 'Failed to add holding — check the symbol and try again.');
+      setErrorMessage(editingId ? 'Failed to update holding.' : 'Failed to add holding.');
     } finally {
       setIsSubmitting(false);
     }
@@ -142,95 +235,94 @@ export const PortfolioTab = () => {
 
   const holdingSymbols = [...new Set((summary?.holdings || []).map((h) => h.symbol))];
 
-  const handleCreateAlert = async (e) => {
-    e.preventDefault();
-    if (!alertSymbol || !alertTarget) return;
-    setIsSubmittingAlert(true);
-    setAlertError('');
-    try {
-      await createThreshold({
-        symbol: alertSymbol.toUpperCase(),
-        condition: alertCondition,
-        target_price: parseFloat(alertTarget),
-        enabled: true,
-      });
-      setAlertTarget('');
-      loadThresholds();
-    } catch (err) {
-      console.error('Failed to create alert:', err);
-      setAlertError('Failed to create alert — you may already have one for this symbol/condition pair.');
-    } finally {
-      setIsSubmittingAlert(false);
-    }
-  };
-
-  const handleToggleAlert = async (threshold) => {
-    try {
-      await updateThreshold(threshold.id, {
-        symbol: threshold.symbol,
-        condition: threshold.condition,
-        target_price: threshold.target_price,
-        enabled: !threshold.enabled,
-      });
-      loadThresholds();
-    } catch (err) {
-      console.error('Failed to toggle alert:', err);
-    }
-  };
-
-  const handleDeleteAlert = async (id) => {
-    try {
-      await deleteThreshold(id);
-      loadThresholds();
-    } catch (err) {
-      console.error('Failed to delete alert:', err);
-    }
+  const renderSortArrow = (field) => {
+    if (sortField !== field) return <span className="text-gray-600 ml-1">↕</span>;
+    return <span className="text-blue-400 ml-1">{sortDirection === 'asc' ? '↑' : '↓'}</span>;
   };
 
   return (
     <div className="p-6 space-y-6 bg-gray-900 text-white min-h-screen">
+      {/* Buying Power & Summary Metric Bar */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-gray-800 p-4 rounded-xl border border-gray-700">
+        <div>
+          <div className="text-xs text-gray-400 uppercase font-semibold">Total Value</div>
+          <div className="text-xl font-bold text-white">
+            ${fmt(summary?.total_value_usd)}
+          </div>
+        </div>
+
+        <div>
+          <div className="text-xs text-gray-400 uppercase font-semibold">Buying Power</div>
+          {isEditingBuyingPower ? (
+            <div className="flex items-center space-x-2 mt-1">
+              <input
+                type="number"
+                step="any"
+                value={buyingPowerInput}
+                onChange={(e) => setBuyingPowerInput(e.target.value)}
+                className="bg-gray-700 text-white px-2 py-1 rounded text-sm w-28 outline-none focus:ring-1 focus:ring-blue-500"
+              />
+              <button
+                onClick={handleSaveBuyingPower}
+                className="bg-blue-600 text-xs px-2 py-1 rounded hover:bg-blue-500"
+              >
+                Save
+              </button>
+              <button
+                onClick={() => setIsEditingBuyingPower(false)}
+                className="text-gray-400 text-xs hover:text-white"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center space-x-2">
+              <span className="text-xl font-bold text-emerald-400">${fmt(buyingPower)}</span>
+              <button
+                onClick={() => {
+                  setBuyingPowerInput(String(buyingPower));
+                  setIsEditingBuyingPower(true);
+                }}
+                className="text-xs text-blue-400 hover:underline"
+              >
+                Edit
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div>
+          <div className="text-xs text-gray-400 uppercase font-semibold">Day Change</div>
+          <GainDisplay
+            absValue={summary?.day_change_abs_usd}
+            pctValue={summary?.day_change_percent}
+          />
+        </div>
+
+        <div>
+          <div className="text-xs text-gray-400 uppercase font-semibold">Total Return</div>
+          <GainDisplay
+            absValue={summary?.total_gain_abs_usd}
+            pctValue={summary?.total_gain_percent}
+          />
+        </div>
+      </div>
+
       {/* Subtab Navigation */}
       <div className="flex space-x-4 border-b border-gray-700 pb-2">
-        <button
-          onClick={() => setActiveSubTab('holdings')}
-          className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-            activeSubTab === 'holdings'
-              ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-white'
-          }`}
-        >
-          Holdings
-        </button>
-        <button
-          onClick={() => setActiveSubTab('alerts')}
-          className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-            activeSubTab === 'alerts'
-              ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-white'
-          }`}
-        >
-          Alerts
-        </button>
-        <button
-          onClick={() => setActiveSubTab('summary')}
-          className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-            activeSubTab === 'summary'
-              ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-white'
-          }`}
-        >
-          Summary
-        </button>
-        <button
-          onClick={() => setActiveSubTab('heatmap')}
-          className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-            activeSubTab === 'heatmap'
-              ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
-              : 'text-gray-400 hover:text-white'
-          }`}
-        >
-          Market Heatmap
-        </button>
+        {['holdings', 'alerts', 'summary', 'heatmap'].map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveSubTab(tab)}
+            className={`px-4 py-2 text-sm font-medium capitalize rounded-t-lg transition-colors ${
+              activeSubTab === tab
+                ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
+                : 'text-gray-400 hover:text-white'
+            }`}
+          >
+            {tab === 'heatmap' ? 'Market Heatmap' : tab}
+          </button>
+        ))}
       </div>
 
       {errorMessage && (
@@ -324,27 +416,41 @@ export const PortfolioTab = () => {
           ) : (
             <div className="overflow-x-auto bg-gray-800 rounded-lg border border-gray-700">
               <table className="w-full text-left text-sm text-gray-300">
-                <thead className="bg-gray-700 text-gray-400 uppercase text-xs">
+                <thead className="bg-gray-700 text-gray-400 uppercase text-xs select-none">
                   <tr>
-                    <th className="px-6 py-3">Symbol</th>
-                    <th className="px-6 py-3">Shares</th>
-                    <th className="px-6 py-3">Avg Cost</th>
-                    <th className="px-6 py-3">Last Price</th>
-                    <th className="px-6 py-3">Market Value</th>
-                    <th className="px-6 py-3">Day Gain %</th>
-                    <th className="px-6 py-3">Total Gain %</th>
+                    <th onClick={() => handleSort('symbol')} className="px-6 py-3 cursor-pointer hover:text-white">
+                      Symbol {renderSortArrow('symbol')}
+                    </th>
+                    <th onClick={() => handleSort('shares')} className="px-6 py-3 cursor-pointer hover:text-white">
+                      Shares {renderSortArrow('shares')}
+                    </th>
+                    <th onClick={() => handleSort('avg_cost')} className="px-6 py-3 cursor-pointer hover:text-white">
+                      Avg Cost {renderSortArrow('avg_cost')}
+                    </th>
+                    <th onClick={() => handleSort('last_price')} className="px-6 py-3 cursor-pointer hover:text-white">
+                      Last Price {renderSortArrow('last_price')}
+                    </th>
+                    <th onClick={() => handleSort('market_value')} className="px-6 py-3 cursor-pointer hover:text-white">
+                      Market Value {renderSortArrow('market_value')}
+                    </th>
+                    <th onClick={() => handleSort('day_gain')} className="px-6 py-3 cursor-pointer hover:text-white">
+                      Day Gain ($ / %) {renderSortArrow('day_gain')}
+                    </th>
+                    <th onClick={() => handleSort('total_gain')} className="px-6 py-3 cursor-pointer hover:text-white">
+                      Total Gain ($ / %) {renderSortArrow('total_gain')}
+                    </th>
                     <th className="px-6 py-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-700">
-                  {(!summary || summary.holdings.length === 0) ? (
+                  {sortedHoldings.length === 0 ? (
                     <tr>
                       <td colSpan="8" className="px-6 py-4 text-center text-gray-500">
                         No holdings found.
                       </td>
                     </tr>
                   ) : (
-                    summary.holdings.map((h) => (
+                    sortedHoldings.map((h) => (
                       <tr key={h.id} className={`hover:bg-gray-750 ${editingId === h.id ? 'bg-amber-950/30' : ''}`}>
                         <td className="px-6 py-4 font-bold text-white">{h.symbol}</td>
                         <td className="px-6 py-4">{fmt(h.shares, 4)}</td>
@@ -358,9 +464,19 @@ export const PortfolioTab = () => {
                             `$${fmt(h.last_price_usd)}`
                           )}
                         </td>
-                        <td className="px-6 py-4">${fmt(h.market_value_usd)}</td>
-                        <td className="px-6 py-4"><GainText value={h.day_gain_percent} isPct /></td>
-                        <td className="px-6 py-4"><GainText value={h.total_gain_percent} isPct /></td>
+                        <td className="px-6 py-4 font-semibold text-white">${fmt(h.market_value_usd)}</td>
+                        <td className="px-6 py-4">
+                          <GainDisplay
+                            absValue={h.day_gain_abs_usd}
+                            pctValue={h.day_gain_percent}
+                          />
+                        </td>
+                        <td className="px-6 py-4">
+                          <GainDisplay
+                            absValue={h.total_gain_abs_usd}
+                            pctValue={h.total_gain_percent}
+                          />
+                        </td>
                         <td className="px-6 py-4 text-right space-x-3 whitespace-nowrap">
                           <button
                             onClick={() => startEdit(h)}
@@ -385,156 +501,6 @@ export const PortfolioTab = () => {
         </div>
       )}
 
-      {/* Alerts Subtab — price thresholds tied to current holdings */}
-      {activeSubTab === 'alerts' && (
-        <div className="space-y-6">
-          <form
-            onSubmit={handleCreateAlert}
-            className="bg-gray-800 p-4 rounded-lg flex flex-wrap items-end gap-4 border border-gray-700"
-          >
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">Symbol</label>
-              <select
-                value={alertSymbol}
-                onChange={(e) => setAlertSymbol(e.target.value)}
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              >
-                <option value="">-- Select holding --</option>
-                {holdingSymbols.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">Condition</label>
-              <select
-                value={alertCondition}
-                onChange={(e) => setAlertCondition(e.target.value)}
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="above">Price goes above</option>
-                <option value="below">Price goes below</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">Target Price</label>
-              <input
-                type="number"
-                step="any"
-                placeholder="0.00"
-                value={alertTarget}
-                onChange={(e) => setAlertTarget(e.target.value)}
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
-            </div>
-            <button
-              type="submit"
-              disabled={isSubmittingAlert || holdingSymbols.length === 0}
-              className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded text-sm font-semibold transition cursor-pointer"
-            >
-              {isSubmittingAlert ? 'Adding...' : 'Add Alert'}
-            </button>
-          </form>
-
-          {holdingSymbols.length === 0 && (
-            <p className="text-xs text-gray-500">Add a holding first to set price alerts for it.</p>
-          )}
-          {alertError && (
-            <div className="bg-red-900/50 border border-red-500 text-red-200 px-4 py-2 rounded text-sm">
-              {alertError}
-            </div>
-          )}
-
-          <div className="overflow-x-auto bg-gray-800 rounded-lg border border-gray-700">
-            <table className="w-full text-left text-sm text-gray-300">
-              <thead className="bg-gray-700 text-gray-400 uppercase text-xs">
-                <tr>
-                  <th className="px-6 py-3">Symbol</th>
-                  <th className="px-6 py-3">Condition</th>
-                  <th className="px-6 py-3">Target Price</th>
-                  <th className="px-6 py-3">Status</th>
-                  <th className="px-6 py-3 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-700">
-                {thresholds.length === 0 ? (
-                  <tr>
-                    <td colSpan="5" className="px-6 py-4 text-center text-gray-500">
-                      No alerts configured.
-                    </td>
-                  </tr>
-                ) : (
-                  thresholds.map((t) => (
-                    <tr key={t.id} className="hover:bg-gray-750">
-                      <td className="px-6 py-4 font-bold text-white">{t.symbol}</td>
-                      <td className="px-6 py-4 capitalize">{t.condition}</td>
-                      <td className="px-6 py-4">${fmt(t.target_price)}</td>
-                      <td className="px-6 py-4">
-                        <button
-                          onClick={() => handleToggleAlert(t)}
-                          className={`text-xs px-2 py-1 rounded font-semibold cursor-pointer ${
-                            t.enabled
-                              ? 'bg-green-900/50 text-green-400 border border-green-700'
-                              : 'bg-gray-700 text-gray-400 border border-gray-600'
-                          }`}
-                        >
-                          {t.enabled ? 'Enabled' : 'Disabled'}
-                        </button>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button
-                          onClick={() => handleDeleteAlert(t.id)}
-                          className="text-red-400 hover:text-red-300 font-medium cursor-pointer"
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Summary Subtab */}
-      {activeSubTab === 'summary' && (
-        <div className="bg-gray-800 p-6 rounded-lg border border-gray-700 space-y-4">
-          <h2 className="text-lg font-bold text-white">Portfolio Overview</h2>
-          {summary ? (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-gray-700 p-4 rounded-lg">
-                <div className="text-xs text-gray-400">Total Value (USD)</div>
-                <div className="text-xl font-bold text-green-400">
-                  ${fmt(summary.total_value_usd)}
-                </div>
-              </div>
-              <div className="bg-gray-700 p-4 rounded-lg">
-                <div className="text-xs text-gray-400">Total Value (EUR)</div>
-                <div className="text-xl font-bold text-green-400">
-                  €{fmt(summary.total_value_eur)}
-                </div>
-              </div>
-              <div className="bg-gray-700 p-4 rounded-lg">
-                <div className="text-xs text-gray-400">Total Gain (%)</div>
-                <div
-                  className={`text-xl font-bold ${
-                    (summary.total_gain_percent || 0) >= 0 ? 'text-green-400' : 'text-red-400'
-                  }`}
-                >
-                  {fmt(summary.total_gain_percent)}%
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="text-gray-400">No summary metrics available.</div>
-          )}
-        </div>
-      )}
-
       {/* Market Heatmap Subtab */}
       {activeSubTab === 'heatmap' && <MarketHeatmap />}
     </div>
@@ -542,5 +508,3 @@ export const PortfolioTab = () => {
 };
 
 export default PortfolioTab;
-
-//TODO: ADD THE BUYING POWER, AKA MONEY LEFT TO USE FOR BUYING

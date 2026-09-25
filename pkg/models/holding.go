@@ -2,6 +2,12 @@ package models
 
 import "time"
 
+type PortfolioSettings struct {
+	ID          uint      `gorm:"primaryKey" json:"portfolio_id"`
+	BuyingPower float64   `gorm:"default:0" json:"buying_power"`
+	UpdatedAt   time.Time `gorm:"default:CURRENT_TIMESTAMP" json:"updated_at"`
+}
+
 type Holding struct {
 	ID                    uint       `gorm:"primaryKey" json:"id"`
 	Symbol                string     `gorm:"type:varchar(10);not null" json:"symbol"`
@@ -69,6 +75,7 @@ type PortfolioSummary struct {
 	TotalGainAbsUSD  float64 `json:"total_gain_abs_usd"`
 	TotalGainAbsEUR  float64 `json:"total_gain_abs_eur"`
 	TotalGainPercent float64 `json:"total_gain_percent"`
+	BuyingPower      float64 `json:"buying_power"`
 
 	Holdings []HoldingQuote `json:"holdings"`
 }

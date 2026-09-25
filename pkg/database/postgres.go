@@ -2,7 +2,6 @@ package database
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -10,15 +9,12 @@ import (
 	"gorm.io/gorm"
 )
 
-var PostgresDB *gorm.DB
-
-func InitPostgresDB() {
+// Helper function to create a PostgreSQL connection pool for a specific database name
+func ConnectPostgresDB(dbName string) (*gorm.DB, error) {
 	host := getEnv("POSTGRES_HOST", "localhost")
 	port := getEnv("POSTGRES_PORT", "5432")
-
 	user := getEnv("POSTGRES_USER", "autoclicker")
 	password := getEnv("POSTGRES_PASSWORD", "password")
-	dbName := getEnv("POSTGRES_DB", "autoclicker")
 	sslMode := getEnv("POSTGRES_SSL_MODE", "disable")
 
 	dsn := fmt.Sprintf(
@@ -26,15 +22,14 @@ func InitPostgresDB() {
 		host, port, user, password, dbName, sslMode,
 	)
 
-	var err error
-	PostgresDB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("Failed to connect to Postgres: %v", err)
+		return nil, fmt.Errorf("gorm open error for %s: %w", dbName, err)
 	}
 
-	sqlDB, err := PostgresDB.DB()
+	sqlDB, err := db.DB()
 	if err != nil {
-		log.Fatalf("Failed to get DB connection: %v", err)
+		return nil, fmt.Errorf("sql.DB error for %s: %w", dbName, err)
 	}
 
 	sqlDB.SetMaxOpenConns(20)
@@ -42,13 +37,12 @@ func InitPostgresDB() {
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 
 	if err := sqlDB.Ping(); err != nil {
-		log.Fatalf("Failed to ping Postgres: %v", err)
+		return nil, fmt.Errorf("ping error for %s: %w", dbName, err)
 	}
 
-	log.Println("Connected to Postgres database.")
+	return db, nil
 }
 
-// Helper function to read an env variable or return a fallback value
 func getEnv(key, fallback string) string {
 	if value, exists := os.LookupEnv(key); exists && value != "" {
 		return value
