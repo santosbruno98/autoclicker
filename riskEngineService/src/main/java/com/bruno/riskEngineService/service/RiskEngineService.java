@@ -10,7 +10,7 @@ import java.time.Instant;
 
 @Service
 public class RiskEngineService {
-    private static final Logger logger = LoggerFactory.getLogger(RiskEngineService.getName());
+    private static final Logger logger = LoggerFactory.getLogger(RiskEngineService.class);
     private static final float MAX_EXPOSURE_LIMIT_PERCENTAGE = 0.10f;
 
     private final ExecutionLogRepository logRepository;

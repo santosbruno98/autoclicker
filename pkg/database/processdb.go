@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 
-	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 
 	"autoclicker/pkg/models"
@@ -19,26 +18,34 @@ func InitDB() {
 
 	// 2. Fallback: Build DSN from individual env variables or safe defaults
 	if dsn == "" {
-		dbUser := getEnv("DB_USER", "autoclicker_user")
-		dbPass := getEnv("DB_PASSWORD", "secret")
-		dbHost := getEnv("DB_HOST", "127.0.0.1")
-		dbPort := getEnv("DB_PORT", "3306")
-		dbName := getEnv("DB_NAME", "autoclicker_db")
+		host := getEnv("POSTGRES_HOST", "localhost")
+		port := getEnv("POSTGRES_PORT", "5432")
+		user := getEnv("POSTGRES_USER", "autoclicker")
+		password := getEnv("POSTGRES_PASSWORD", "password")
+		dbName := getEnv("POSTGRES_DB", "autoclicker")
+		sslMode := getEnv("POSTGRES_SSL_MODE", "disable")
 
-		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-			dbUser, dbPass, dbHost, dbPort, dbName,
+		dsn = fmt.Sprintf(
+			"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+			host,
+			port,
+			user,
+			password,
+			dbName,
+			sslMode,
 		)
 	}
 
-	var err error
-	DB, err = gorm.Open(mysql.New(mysql.Config{
-		DSN:                      dsn,
-		DisableDatetimePrecision: true,
-	}), &gorm.Config{})
-	if err != nil {
-		log.Fatalf("Failed to connect to MySQL database: %v", err)
-	}
-
+	// var err error
+	// DB, err = gorm.Open(mysql.New(mysql.Config{
+	// 	DSN:                      dsn,
+	// 	DisableDatetimePrecision: true,
+	// }), &gorm.Config{})
+	// if err != nil {
+	// 	log.Fatalf("Failed to connect to MySQL database: %v", err)
+	// }
+	DB = PostgresDB
+	
 	// Auto-Migrate creates or updates the tasks table schema
 	if err := DB.AutoMigrate(&models.Task{}); err != nil {
 		log.Fatalf("Failed to run database migrations: %v", err)
@@ -47,10 +54,4 @@ func InitDB() {
 	log.Println("Database connection established and migrations applied.")
 }
 
-// Helper function to read an env variable or return a fallback value
-func getEnv(key, fallback string) string {
-	if value, exists := os.LookupEnv(key); exists && value != "" {
-		return value
-	}
-	return fallback
-}
+

@@ -58,6 +58,7 @@ func main() {
 		}
 	}()
 
+	database.InitPortfolioDB()
 	database.InitDB()
 	database.InitNotesDB()
 	database.InitPortfolioDB()
