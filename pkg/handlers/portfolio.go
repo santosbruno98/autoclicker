@@ -13,6 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const portfolioWorkerCount = 8
+
 func GetHoldings(c *gin.Context) {
 	var holdings []models.Holding
 	if err := database.PortfolioDB.Order("symbol desc").Find(&holdings).Error; err != nil {
@@ -81,25 +83,7 @@ func GetPortfolioSummary(c *gin.Context) {
 		return
 	}
 
-	results := make([]models.HoldingQuote, len(holdings))
-	var wg sync.WaitGroup
-
-	for i, h := range holdings {
-		wg.Add(1)
-		go func(i int, h models.Holding) {
-			defer wg.Done()
-			defer func() {
-				if r := recover(); r != nil {
-					results[i] = models.HoldingQuote{
-						Holding:         h,
-						QuoteFetchError: fmt.Sprintf("internal error fetching quote: %v", r),
-					}
-				}
-			}()
-			results[i] = buildHoldingQuote(h)
-		}(i, h)
-	}
-	wg.Wait()
+	results := processHoldingQuotes(holdings)
 
 	// The bug: this used to stay an empty slice forever — totals were summed
 	// from `results` directly below, but `results` itself was never assigned
@@ -189,6 +173,67 @@ func fxOrOne(from, to string) float64 {
 		return 0
 	}
 	return rate
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+
+	return b
+}
+
+func processHoldingQuotes(
+	holdings []models.Holding,
+) []models.HoldingQuote {
+	results := make([]models.HoldingQuote, len(holdings))
+
+	jobs := make(chan int)
+
+	var wg sync.WaitGroup
+
+	workerCount := min(
+		portfolioWorkerCount,
+		len(holdings),
+	)
+
+	wg.Add(workerCount)
+
+	for worker := 0; worker < workerCount; worker++ {
+		go func() {
+			defer wg.Done()
+
+			for index := range jobs {
+				holding := holdings[index]
+
+				func() {
+					defer func() {
+						if recovered := recover(); recovered != nil {
+							results[index] = models.HoldingQuote{
+								Holding: holding,
+								QuoteFetchError: fmt.Sprintf(
+									"internal error fetching quote: %v",
+									recovered,
+								),
+							}
+						}
+					}()
+
+					results[index] = buildHoldingQuote(holding)
+				}()
+			}
+		}()
+	}
+
+	for index := range holdings {
+		jobs <- index
+	}
+
+	close(jobs)
+
+	wg.Wait()
+
+	return results
 }
 
 // GetPortfolioHistory returns combined intraday OHLC bars for the whole

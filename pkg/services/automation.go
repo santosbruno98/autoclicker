@@ -33,12 +33,17 @@ type JobManager struct {
 
 var Manager = &JobManager{}
 
-func (m *JobManager) InitKafka(brokers []string, topic string) {
-	m.kafkaWriter = &kafka.Writer{
-		Addr:     kafka.TCP(brokers...),
-		Topic:    topic,
-		Balancer: &kafka.LeastBytes{},
-	}
+func (m *JobManager) InitKafka(writer *kafka.Writer) {
+	// m.kafkaWriter = &kafka.Writer{
+	// 	Addr:     kafka.TCP(brokers...),
+	// 	Topic:    topic,
+	// 	Balancer: &kafka.LeastBytes{},
+	// } Insted of creating a new writer, we'll just use the existing one
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.kafkaWriter = writer
+
 }
 
 func (m *JobManager) log(format string, args ...interface{}) {
@@ -51,20 +56,30 @@ func (m *JobManager) log(format string, args ...interface{}) {
 	m.logsMu.Unlock()
 
 	if m.kafkaWriter != nil {
-		go func(msg string) {
-			err := m.kafkaWriter.WriteMessages(context.Background(), kafka.Message{
-				Value: []byte(msg),
-			})
-			if err != nil {
-				log.Printf("Failed to write log message to Kafka: %v", err)
-			}
-		}(line)
+		// go func(msg string) {
+		// 	err := m.kafkaWriter.WriteMessages(context.Background(), kafka.Message{
+		// 		Value: []byte(msg),
+		// 	})
+		// 	if err != nil {
+		// 		log.Printf("Failed to write log message to Kafka: %v", err)
+		// 	}
+		// }(line)
+		err := m.kafkaWriter.WriteMessages(
+			context.Background(),
+			kafka.Message{
+				Value: []byte(line),
+			},
+		)
+		if err != nil {
+			log.Printf("Failed to write log message to Kafka: %v", err)
+		}
 	}
 }
 
 func (m *JobManager) GetLogs() []string {
 	m.logsMu.Lock()
 	defer m.logsMu.Unlock()
+
 	out := make([]string, len(m.logs))
 	copy(out, m.logs)
 	return out
@@ -91,6 +106,7 @@ func (m *JobManager) StartJob(taskID uint, pid int) error {
 	}
 
 	var task models.Task
+
 	if err := database.DB.First(&task, taskID).Error; err != nil {
 		return fmt.Errorf("task profile not found")
 	}
@@ -98,6 +114,7 @@ func (m *JobManager) StartJob(taskID uint, pid int) error {
 	m.clearLogs()
 	m.cancel = make(chan struct{})
 	m.active = true
+
 	m.status = models.JobStatus{
 		ID:        "active_job",
 		TaskID:    task.ID,
@@ -125,6 +142,7 @@ func (m *JobManager) StopJob() error {
 
 	close(m.cancel)
 	m.active = false
+
 	m.status.IsRunning = false
 	m.log("Automation stopped.")
 	return nil
@@ -146,12 +164,46 @@ func (m *JobManager) GetStatus() models.JobStatus {
 	return m.status
 }
 
-func (m *JobManager) worker(task models.Task, pid int, cancel chan struct{}) {
-	keyDelay := time.Duration(task.KeyDelay * float64(time.Second))
-	loopDelay := time.Duration(task.LoopDelay * float64(time.Second))
+// waitOrCancel waits for the requested duration but wakes up immediately
+// when the automation job is stopped.
+func waitOrCancel(cancel <-chan struct{}, duration time.Duration) bool {
+	if duration <= 0 {
+		select {
+		case <-cancel:
+			return false
+		default:
+			return true
+		}
+	}
+
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+
+	select {
+	case <-cancel:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (m *JobManager) worker(
+	task models.Task,
+	pid int,
+	cancel <-chan struct{},
+) {
+	keyDelay := time.Duration(
+		task.KeyDelay * float64(time.Second),
+	)
+
+	loopDelay := time.Duration(
+		task.LoopDelay * float64(time.Second),
+	)
 
 	rawKeys := strings.Split(task.Keys, ",")
+
 	keys := make([]string, 0, len(rawKeys))
+
 	for _, k := range rawKeys {
 		if trimmed := strings.TrimSpace(strings.ToLower(k)); trimmed != "" {
 			keys = append(keys, trimmed)
@@ -165,54 +217,114 @@ func (m *JobManager) worker(task models.Task, pid int, cancel chan struct{}) {
 		select {
 		case <-cancel:
 			return
+
 		default:
-			// Crash detection: is the target process still alive at all?
-			exists, _ := process.PidExistsWithContext(ctx, int32(pid))
+			exists, _ := process.PidExistsWithContext(
+				ctx,
+				int32(pid),
+			)
+
 			if !exists {
-				m.stopFromWorker(fmt.Sprintf("Target PID %d no longer exists (process crashed or closed). Automation stopped automatically.", pid))
+				m.stopFromWorker(
+					fmt.Sprintf(
+						"Target PID %d no longer exists (process crashed or closed). Automation stopped automatically.",
+						pid,
+					),
+				)
+
 				return
 			}
 
-			// Focus handling (process alive but not the foreground window)
 			if robotgo.GetPid() != pid {
 				if task.AutoFocus {
-					m.log("Target PID %d lost focus. Activating window...", pid)
+					m.log(
+						"Target PID %d lost focus. Activating window...",
+						pid,
+					)
+
 					_ = robotgo.ActivePid(pid)
-					time.Sleep(200 * time.Millisecond)
+
+					if !waitOrCancel(
+						cancel,
+						200*time.Millisecond,
+					) {
+						return
+					}
 				} else {
-					m.log("Target PID %d is not active. Pausing...", pid)
-					time.Sleep(1 * time.Second)
+					m.log(
+						"Target PID %d is not active. Pausing...",
+						pid,
+					)
+
+					if !waitOrCancel(
+						cancel,
+						time.Second,
+					) {
+						return
+					}
+
 					continue
 				}
 			}
 
 			loopCount++
-			m.log("--- Loop #%d ---", loopCount)
+
+			m.log(
+				"--- Loop #%d ---",
+				loopCount,
+			)
 
 			for idx, key := range keys {
 				select {
 				case <-cancel:
 					return
+
 				default:
-					exists, _ := process.PidExistsWithContext(ctx, int32(pid))
+					exists, _ := process.PidExistsWithContext(
+						ctx,
+						int32(pid),
+					)
+
 					if !exists {
-						m.stopFromWorker(fmt.Sprintf("Target PID %d no longer exists mid-sequence. Automation stopped automatically.", pid))
+						m.stopFromWorker(
+							fmt.Sprintf(
+								"Target PID %d no longer exists mid-sequence. Automation stopped automatically.",
+								pid,
+							),
+						)
+
 						return
 					}
+
 					if robotgo.GetPid() != pid {
-						m.log("Target lost focus mid-sequence! Aborting current loop.")
+						m.log(
+							"Target lost focus mid-sequence! Aborting current loop.",
+						)
+
 						break
 					}
-					m.log("Pressing key [%d/%d]: %s", idx+1, len(keys), key)
+
+					m.log(
+						"Pressing key [%d/%d]: %s",
+						idx+1,
+						len(keys),
+						key,
+					)
+
 					pressKey(key)
+
 					if idx < len(keys)-1 && keyDelay > 0 {
-						time.Sleep(keyDelay)
+						if !waitOrCancel(cancel, keyDelay) {
+							return
+						}
 					}
 				}
 			}
 
 			if loopDelay > 0 {
-				time.Sleep(loopDelay)
+				if !waitOrCancel(cancel, loopDelay) {
+					return
+				}
 			}
 		}
 	}
@@ -224,14 +336,17 @@ func pressKey(key string) {
 		robotgo.KeyToggle("lshift", "down")
 		time.Sleep(50 * time.Millisecond)
 		robotgo.KeyToggle("lshift", "up")
+
 	case "ctrl", "control":
 		robotgo.KeyToggle("lctrl", "down")
 		time.Sleep(50 * time.Millisecond)
 		robotgo.KeyToggle("lctrl", "up")
+
 	case "alt":
 		robotgo.KeyToggle("lalt", "down")
 		time.Sleep(50 * time.Millisecond)
 		robotgo.KeyToggle("lalt", "up")
+
 	default:
 		robotgo.KeyTap(key)
 	}

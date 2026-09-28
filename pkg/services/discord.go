@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-
 	"os"
+	"time"
 )
 
 type GrafanaAlertWebhook struct {
@@ -27,6 +27,10 @@ type GrafanaAlert struct {
 
 type discordWebhookPayload struct {
 	Content string `json:"content"`
+}
+
+var discordHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
 }
 
 func HandlerGrafanaAlert(payload GrafanaAlertWebhook) error {
@@ -53,8 +57,7 @@ func HandlerGrafanaAlert(payload GrafanaAlertWebhook) error {
 
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp , err := discordHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}

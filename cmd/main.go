@@ -49,15 +49,29 @@ func main() {
 	serviceName := "autoclicker-go-backend"
 
 	// Initializing LogProducer with error handling
-	kafkaProducer, err := kafka.NewLogProducer(brokers, topic, serviceName)
+	kafkaProducer, err := kafka.NewLogProducer(
+		brokers,
+		topic,
+		serviceName,
+	)
+
 	if err != nil {
-		log.Fatalf("Failed to initialize Kafka producer: %v", err)
+		log.Fatalf(
+			"Failed to initialize Kafka producer: %v",
+			err,
+		)
 	}
+
 	defer func() {
 		if err := kafkaProducer.Close(); err != nil {
-			log.Printf("Error closing Kafka producer: %v", err)
+			log.Printf(
+				"Error closing Kafka producer: %v",
+				err,
+			)
 		}
 	}()
+
+	services.Manager.InitKafka(kafkaProducer.Writer)
 
 	// database.InitPostgresDB()
 	database.InitDB()
