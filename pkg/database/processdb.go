@@ -10,7 +10,7 @@ import (
 
 var DB *gorm.DB
 
-func InitDB() {
+func InitCoreDB() {
 	var err error
 	dbName := getEnv("POSTGRES_DB", "autoclicker")
 	DB, err = ConnectPostgresDB(dbName)

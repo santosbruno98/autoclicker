@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"time"
@@ -17,9 +18,9 @@ func ConnectPostgresDB(dbName string) (*gorm.DB, error) {
 	user := getEnv("POSTGRES_USER", "autoclicker")
 	password := getEnv("POSTGRES_PASSWORD", "password")
 	sslMode := getEnv("POSTGRES_SSL_MODE", "disable")
-	MaxOpenConns := getEnvInt("MAX_OPEN_CONNS", "5")
-	MaxIdleConns := getEnvInt("MAX_IDLE_CONNS", "2")
-	
+	MaxOpenConns := getEnvInt("MAX_OPEN_CONNS", 5)
+	MaxIdleConns := getEnvInt("MAX_IDLE_CONNS", 2)
+
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
 		host, port, user, password, dbName, sslMode,
@@ -53,8 +54,7 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-
-func getEnvInt(key string, fallback int) int {~
+func getEnvInt(key string, fallback int) int {
 	value := os.Getenv(key)
 
 	if value == "" {

@@ -73,8 +73,7 @@ func main() {
 
 	services.Manager.InitKafka(kafkaProducer.Writer)
 
-	// database.InitPostgresDB()
-	database.InitDB()
+	database.InitCoreDB()
 	database.InitNotesDB()
 	database.InitPortfolioDB()
 
