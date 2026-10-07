@@ -110,6 +110,10 @@ func main() {
 		api.GET("/portfolio/buyingPower", handlers.GetBuyingPower)
 		api.PUT("/portfolio/buyingPower", handlers.UpdateBuyingPower)
 
+		// Market APIs
+		api.POST("/market/documents", handlers.ProcessMarketPDF)
+		
+
 		// Threshold APIs
 		api.GET("/portfolio/thresholds", handlers.GetPriceThresholds)
 		api.GET("/portfolio/thresholds/:id", handlers.GetPriceThreshold)
