@@ -112,7 +112,7 @@ func main() {
 
 		// Market APIs
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
-		
+		api.GET("/market/quotes", handlers.GetMarketQuotes)
 
 		// Threshold APIs
 		api.GET("/portfolio/thresholds", handlers.GetPriceThresholds)
