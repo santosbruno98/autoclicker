@@ -2,12 +2,18 @@ package kafka
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
+	"github.com/segmentio/kafka-go/sasl/scram"
 )
 
 type LogProducer struct {
@@ -16,25 +22,125 @@ type LogProducer struct {
 	ServiceName string
 }
 
-func NewLogProducer(brokers []string, topic, serviceName string) (*LogProducer, error) {
+func kafkaTLSConfig() (*tls.Config, error) {
+	if !strings.EqualFold(os.Getenv("KAFKA_TLS_ENABLED"), "true") {
+		return nil, nil
+	}
+
+	config := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+	}
+
+	caPath := strings.TrimSpace(os.Getenv("KAFKA_CA_CERT_PATH"))
+	if caPath != "" {
+		caPEM, err := os.ReadFile(caPath)
+		if err != nil {
+			return nil, fmt.Errorf("read Kafka CA certificate: %w", err)
+		}
+
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+
+		if !roots.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("invalid Kafka CA certificate")
+		}
+		config.RootCAs = roots
+	}
+
+	certPath := strings.TrimSpace(os.Getenv("KAFKA_CLIENT_CERT_PATH"))
+	keyPath := strings.TrimSpace(os.Getenv("KAFKA_CLIENT_KEY_PATH"))
+
+	if (certPath == "") != (keyPath == "") {
+		return nil, fmt.Errorf(
+			"Kafka client certificate and key must be configured together",
+		)
+	}
+
+	if certPath != "" {
+		certificate, err := tls.LoadX509KeyPair(certPath, keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load Kafka client certificate: %w", err)
+		}
+
+		config.Certificates = []tls.Certificate{certificate}
+	}
+
+	return config, nil
+}
+
+func kafkaSASLMechanism() (sasl.Mechanism, error) {
+	username := strings.TrimSpace(os.Getenv("KAFKA_SASL_USERNAME"))
+	password := os.Getenv("KAFKA_SASL_PASSWORD")
+
+	if username == "" && password == "" {
+		return nil, nil
+	}
+
+	if username == "" || password == "" {
+		return nil, fmt.Errorf(
+			"both KAFKA_SASL_USERNAME and KAFKA_SASL_PASSWORD are required",
+		)
+	}
+
+	algorithm := scram.SHA256
+
+	if strings.EqualFold(
+		os.Getenv("KAFKA_SASL_MECHANISM"),
+		"SCRAM-SHA-512",
+	) {
+		algorithm = scram.SHA512
+	}
+
+	return scram.Mechanism(algorithm, username, password)
+}
+
+func NewLogProducer(
+	brokers []string,
+	topic string,
+	serviceName string,
+) (*LogProducer, error) {
 	if len(brokers) == 0 {
-		return nil, fmt.Errorf("kafka initialization failed: broker list cannot be empty")
+		return nil, fmt.Errorf("Kafka broker list cannot be empty")
 	}
 
 	if topic == "" {
-		return nil, fmt.Errorf("kafka initialization failed: topic name cannot be empty")
+		return nil, fmt.Errorf("Kafka topic cannot be empty")
+	}
+
+	tlsConfig, err := kafkaTLSConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	mechanism, err := kafkaSASLMechanism()
+	if err != nil {
+		return nil, err
+	}
+
+	if mechanism != nil && tlsConfig == nil {
+		return nil, fmt.Errorf(
+			"Kafka SASL credentials require KAFKA_TLS_ENABLED=true",
+		)
+	}
+
+	transport := &kafka.Transport{
+		TLS:  tlsConfig,
+		SASL: mechanism,
 	}
 
 	writer := &kafka.Writer{
 		Addr:                   kafka.TCP(brokers...),
 		Topic:                  topic,
 		Balancer:               &kafka.LeastBytes{},
+		Transport:              transport,
 		Async:                  true,
 		BatchTimeout:           10 * time.Millisecond,
-		AllowAutoTopicCreation: true,
+		AllowAutoTopicCreation: false,
 		Completion: func(messages []kafka.Message, err error) {
 			if err != nil {
-				log.Printf("Failed to send log message to Kafka: %v", err)
+				log.Printf("Kafka delivery failed: %v", err)
 			}
 		},
 	}
