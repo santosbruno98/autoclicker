@@ -176,4 +176,7 @@ func main() {
 
 	//TODO: Put the API logs into a topic and the application logs into another topic, using wildcard binding strings.
 	// TODO: Topic exchanges route dynamically based on routing keys containing dot-seperated words, allowing systems to selectively bind queues using wildcards
+
+	// TODO: If the same file is processed multiple times, then i dont need to call the model api again. i want to save the ai model responses in my db
+
 }
