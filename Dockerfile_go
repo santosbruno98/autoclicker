@@ -1,12 +1,13 @@
-# Stage 1: Compile Go for Linux ARM64
-FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
 
-ARG TARGETOS
-ARG TARGETARCH
+# ============================================================
+# Stage 1: Build Go backend for Google Cloud Run (Linux AMD64)
+# ============================================================
+
+FROM golang:1.26-bookworm AS builder
 
 WORKDIR /src
 
-# Dependencies needed by packages using CGO.
+# Install system dependencies needed by Go packages.
 RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     gcc \
@@ -18,31 +19,38 @@ RUN apt-get update && apt-get install -y \
     libxkbcommon-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Download Go dependencies separately for Docker layer caching.
 COPY go.mod go.sum ./
 RUN go mod download
 
+# Copy application source code.
 COPY . .
 
-# Build the cloud entrypoint.
-# This avoids compiling the Windows desktop automation entrypoint.
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+# Build only the cloud entry point.
+# Avoid compiling Windows desktop automation functionality.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" \
     -o /out/server ./cmd/cloud
 
 
-# Stage 2: Runtime with Python
+# ============================================================
+# Stage 2: Python runtime + compiled Go backend
+# ============================================================
+
 FROM python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHON_EXECUTABLE=/opt/venv/bin/python \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    PORT=8080
 
 WORKDIR /app
 
-# Install Python dependencies in an isolated environment.
+# Create an isolated Python environment.
 RUN python -m venv /opt/venv
 
+# Install Python market-processing dependencies.
 COPY market_processor/requirements.txt \
     /app/market_processor/requirements.txt
 
@@ -50,9 +58,10 @@ RUN pip install --no-cache-dir \
     -r /app/market_processor/requirements.txt \
     python-dotenv
 
-# Copy only the required runtime files.
+# Copy the compiled Go server.
 COPY --from=builder /out/server /app/server
 
+# Copy the Python PDF market processor.
 COPY market_processor/market_processor.py \
     /app/market_processor/market_processor.py
 
@@ -62,6 +71,8 @@ RUN useradd --system --create-home appuser \
 
 USER appuser
 
+# Cloud Run routes incoming requests to this container port.
 EXPOSE 8080
 
+# Start the Go HTTP API.
 CMD ["/app/server"]
