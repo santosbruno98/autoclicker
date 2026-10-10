@@ -29,7 +29,7 @@ COPY . .
 # Build only the cloud entry point.
 # Avoid compiling Windows desktop automation functionality.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" \
+    go build -tags=cloud -trimpath -ldflags="-s -w" \
     -o /out/server ./cmd/cloud
 
 
