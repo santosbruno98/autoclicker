@@ -84,7 +84,11 @@ func main() {
 	// Prometheus metrics
 	router.GET("/metrics", handlers.GetPrometheusMetrics)
 
-	log.Printf("Starting Cloud Run API on port %s", port)
+	log.Println("=== REGISTERED API ROUTES ===")
+	for _, route := range router.Routes() {
+		log.Printf("%-7s %s", route.Method, route.Path)
+	}
+	log.Println("=============================")
 
 	if err := router.Run("0.0.0.0:" + port); err != nil {
 		log.Fatal(err)
