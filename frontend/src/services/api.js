@@ -1,8 +1,23 @@
+
 import axios from 'axios';
 
 const API = axios.create({
   baseURL: '/api/v1',
+  withCredentials: true,
+  headers: {
+    'X-Requested-With': 'XMLHttpRequest',
+  },
 });
+
+API.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      window.dispatchEvent(new Event('auth:expired'));
+    }
+    return Promise.reject(error);
+  }
+);
 
 // Process APIs
 export const fetchProcesses = async (nameQuery = '') => {
@@ -13,9 +28,8 @@ export const fetchProcesses = async (nameQuery = '') => {
   return (await API.get(url)).data;
 };
 
-export const verifyPID = async (pid) => {
-  return (await API.get(`/processes/verify/${pid}`)).data;
-};
+export const verifyPID = async (pid) =>
+  (await API.get(`/processes/verify/${pid}`)).data;
 
 // Task CRUD APIs
 export const fetchTasks = async () =>
@@ -107,11 +121,7 @@ export const processMarketDocument = async (file) => {
   formData.append('file', file);
 
   return (
-    await API.post('/market/documents', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    })
+    await API.post('/market/documents', formData)
   ).data;
 };
 
