@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
 
+	"autoclicker/pkg/auth"
 	"autoclicker/pkg/database"
 	"autoclicker/pkg/handlers"
 
@@ -29,8 +31,27 @@ func main() {
 	database.InitNotesDB()
 	database.InitPortfolioDB()
 
+	// Authentication
+	authService, err := auth.NewService(context.Background())
+	if err != nil {
+		log.Fatalf("Authentication initialization failed: %v", err)
+	}
+	defer authService.Close()
+
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery())
+
+	// Authentication
+	router.POST("/auth/google", authService.GoogleLogin)
+
+	authenticated := router.Group("/")
+	authenticated.Use(authService.RequireSession())
+
+	authenticated.GET("/auth/me", authService.Me)
+	authenticated.POST("/auth/logout", authService.Logout)
+
+	// Prometheus metrics
+	authenticated.GET("/metrics", handlers.GetPrometheusMetrics)
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -39,7 +60,7 @@ func main() {
 		})
 	})
 
-	api := router.Group("/api/v1")
+	api := authenticated.Group("/api/v1")
 	{
 		// Tasks
 		api.POST("/tasks", handlers.CreateTask)
@@ -77,12 +98,10 @@ func main() {
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
 
-		// Grafana webhook
-		api.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
 	}
 
-	// Prometheus metrics
-	router.GET("/metrics", handlers.GetPrometheusMetrics)
+	// Grafana webhook
+	router.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
 
 	log.Println("=== REGISTERED API ROUTES ===")
 	for _, route := range router.Routes() {
