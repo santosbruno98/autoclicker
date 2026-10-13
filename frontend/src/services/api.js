@@ -24,27 +24,26 @@ export const fetchProcesses = async (nameQuery = '') => {
   const url = nameQuery
     ? `/processes?name=${encodeURIComponent(nameQuery)}`
     : '/processes';
-
   return (await API.get(url)).data;
 };
 
 export const verifyPID = async (pid) =>
   (await API.get(`/processes/verify/${pid}`)).data;
 
-// Task CRUD APIs
+// Task APIs
 export const fetchTasks = async () =>
   (await API.get('/tasks')).data;
 
-export const createTask = async (taskData) =>
-  (await API.post('/tasks', taskData)).data;
+export const createTask = async (payload) =>
+  (await API.post('/tasks', payload)).data;
 
-export const updateTask = async (id, taskData) =>
-  (await API.put(`/tasks/${id}`, taskData)).data;
+export const updateTask = async (id, payload) =>
+  (await API.put(`/tasks/${id}`, payload)).data;
 
 export const deleteTask = async (id) =>
   (await API.delete(`/tasks/${id}`)).data;
 
-// Automation Controls
+// Automation APIs
 export const fetchAutomationStatus = async () =>
   (await API.get('/automation/status')).data;
 
@@ -57,7 +56,7 @@ export const startJob = async (payload) =>
 export const stopJob = async () =>
   (await API.post('/automation/stop')).data;
 
-// Notes / Checklist APIs
+// Notes APIs
 export const fetchNotes = async () =>
   (await API.get('/notes')).data;
 
@@ -119,10 +118,7 @@ export const deleteThreshold = async (id) =>
 export const processMarketDocument = async (file) => {
   const formData = new FormData();
   formData.append('file', file);
-
-  return (
-    await API.post('/market/documents', formData)
-  ).data;
+  return (await API.post('/market/documents', formData)).data;
 };
 
 export const fetchMarketQuotes = async (symbols) => {
@@ -144,9 +140,29 @@ export const fetchMarketQuotes = async (symbols) => {
 
   return (
     await API.get('/market/quotes', {
-      params: {
-        symbols: uniqueSymbols.join(','),
-      },
+      params: { symbols: uniqueSymbols.join(',') },
     })
   ).data;
+};
+
+// Dividend APIs
+export const fetchDividends = async () =>
+  (await API.get('/portfolio/dividends')).data;
+
+export const createDividend = async (payload) =>
+  (await API.post('/portfolio/dividends', payload)).data;
+
+export const updateDividend = async (id, payload) =>
+  (await API.put(`/portfolio/dividends/${id}`, payload)).data;
+
+export const deleteDividend = async (id) =>
+  (await API.delete(`/portfolio/dividends/${id}`)).data;
+
+
+export const fetchPortfolioDividends = async (forceRefresh = false) => {
+  const response = await API.get('/portfolio/dividends', {
+    params: forceRefresh ? { refresh: 'true' } : {},
+  });
+
+  return response.data;
 };

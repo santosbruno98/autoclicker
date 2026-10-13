@@ -14,7 +14,7 @@ const maxFileSize = 25 << 20 // 25 MiB
 func ProcessMarketPDF(c *gin.Context) {
 	fileHandler, err := c.FormFile("file")
 	if err != nil {
-		log.Println("PDF file is required using the 'file' field-> %s", err)
+		log.Printf("PDF file is required using the 'file' field-> %s", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "PDF file is required using the 'file' field"})
 		return
 	}

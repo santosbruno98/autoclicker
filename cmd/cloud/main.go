@@ -94,6 +94,8 @@ func main() {
 		api.PUT("/portfolio/thresholds/:id", handlers.UpdatePriceThreshold)
 		api.DELETE("/portfolio/thresholds/:id", handlers.DeleteThreshold)
 
+		api.GET("/portfolio/dividends", handlers.GetPortfolioDividends)
+
 		// Market data and PDF processing
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
 		api.POST("/market/documents", handlers.ProcessMarketPDF)

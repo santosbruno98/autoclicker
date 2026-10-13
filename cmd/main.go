@@ -110,6 +110,11 @@ func main() {
 		api.GET("/portfolio/buyingPower", handlers.GetBuyingPower)
 		api.PUT("/portfolio/buyingPower", handlers.UpdateBuyingPower)
 
+		// Dividend APIs
+
+		api.GET("/portfolio/dividends", handlers.GetPortfolioDividends)
+
+
 		// Market APIs
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
 		api.GET("/market/quotes", handlers.GetMarketQuotes)

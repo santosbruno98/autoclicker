@@ -13,6 +13,7 @@ var PortfolioDB *gorm.DB
 func InitPortfolioDB() {
 	var err error
 	dbName := "portfolio_db"
+
 	PortfolioDB, err = ConnectPostgresDB(dbName)
 	if err != nil {
 		log.Fatalf("Failed to connect to Postgres: %v", err)
@@ -22,6 +23,7 @@ func InitPortfolioDB() {
 		&models.Holding{},
 		&models.PriceThreshold{},
 		&models.PortfolioSettings{},
+		&models.DividendPayment{},
 	); err != nil {
 		log.Fatalf("Failed to migrate portfolio tables: %v", err)
 	}

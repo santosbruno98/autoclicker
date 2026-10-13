@@ -157,7 +157,7 @@ func (m *JobManager) stopFromWorker(reason string) {
 	m.active = false
 	m.status.IsRunning = false
 	m.mu.Unlock()
-	m.log(reason)
+	m.log("%s", reason)
 }
 
 func (m *JobManager) GetStatus() models.JobStatus {

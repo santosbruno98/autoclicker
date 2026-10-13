@@ -1,8 +1,17 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+
+import React, {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+} from 'react';
+
 import { MarketHeatmap } from './MarketHeatmap';
 import MarketSummaryTab from './MarketSummaryTab';
+
 import {
   fetchPortfolioSummary,
+  fetchPortfolioDividends,
   createHolding,
   updateHolding,
   deleteHolding,
@@ -11,367 +20,311 @@ import {
   updateBuyingPower,
 } from '../services/api';
 
-function fmt(n, decimals = 2) {
-  if (n === undefined || n === null || Number.isNaN(n)) {
-    return '--';
-  }
+function fmt(value, decimals = 2) {
+  if (value == null || !Number.isFinite(Number(value))) return '--';
 
-  return Number(n).toLocaleString(undefined, {
+  return Number(value).toLocaleString('en-US', {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
 }
 
-function fmtDate(d) {
-  if (!d) {
-    return '';
-  }
-
-  return new Date(d).toISOString().slice(0, 10);
+function money(value, currency = 'EUR') {
+  if (value == null) return '--';
+  return `${currency === 'EUR' ? '€' : '$'}${fmt(value)}`;
 }
 
-function GainDisplay({ absValue, pctValue, prefix = '$' }) {
-  if (absValue === undefined && pctValue === undefined) {
-    return <span className="text-gray-500">--</span>;
-  }
+function GainDisplay({ value, percent, currency = 'USD' }) {
+  if (value == null) return <span>--</span>;
 
-  const positive = (absValue ?? pctValue ?? 0) >= 0;
-  const color = positive ? 'text-green-400' : 'text-red-400';
-  const sign = positive ? '+' : '';
+  const positive = Number(value) >= 0;
 
   return (
-    <div className={`flex flex-col ${color}`}>
-      <span className="font-semibold">
-        {sign}
-        {prefix}
-        {fmt(Math.abs(absValue ?? 0))}
-      </span>
-
-      <span className="text-xs opacity-80">
-        {sign}
-        {fmt(pctValue)}%
-      </span>
+    <div className={positive ? 'text-green-400' : 'text-red-400'}>
+      <div className="font-semibold">
+        {positive ? '+' : '-'}
+        {money(Math.abs(value), currency)}
+      </div>
+      {percent != null && (
+        <div className="text-xs">
+          {Number(percent) >= 0 ? '+' : ''}
+          {fmt(percent)}%
+        </div>
+      )}
     </div>
   );
 }
 
-export const PortfolioTab = () => {
+const inputClass =
+  'bg-gray-700 text-white px-3 py-2 rounded text-sm ' +
+  'border border-gray-600';
+
+const initialHolding = {
+  symbol: '',
+  shares: '',
+  purchase_price: '',
+  purchase_price_currency: 'USD',
+  purchase_date: '',
+};
+
+export default function PortfolioTab() {
   const [activeSubTab, setActiveSubTab] = useState('holdings');
 
   const [summary, setSummary] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState('');
-
-  // Buying Power
-  const [buyingPower, setBuyingPower] = useState(0);
-  const [isEditingBuyingPower, setIsEditingBuyingPower] = useState(false);
-  const [buyingPowerInput, setBuyingPowerInput] = useState('');
-
-  // Table sorting
-  const [sortField, setSortField] = useState('market_value');
-  const [sortDirection, setSortDirection] = useState('desc');
-
-  // Add/Edit holding form
-  const [editingId, setEditingId] = useState(null);
-  const [symbol, setSymbol] = useState('');
-  const [shares, setShares] = useState('');
-  const [purchasePrice, setPurchasePrice] = useState('');
-  const [currency, setCurrency] = useState('USD');
-  const [purchaseDate, setPurchaseDate] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Alerts
+  const [dividends, setDividends] = useState(null);
   const [thresholds, setThresholds] = useState([]);
 
-  const fetchPortfolioData = useCallback(async () => {
-    try {
-      setLoading(true);
-      setErrorMessage('');
+  const [buyingPower, setBuyingPower] = useState(0);
+  const [buyingPowerInput, setBuyingPowerInput] = useState('');
+  const [editingBuyingPower, setEditingBuyingPower] = useState(false);
 
-      const [data, bpData] = await Promise.all([
+  const [holdingForm, setHoldingForm] = useState(initialHolding);
+  const [editingHoldingId, setEditingHoldingId] = useState(null);
+
+  const [sortField, setSortField] = useState('market_value_usd');
+  const [sortDirection, setSortDirection] = useState('desc');
+
+  const [loading, setLoading] = useState(true);
+  const [refreshingDividends, setRefreshingDividends] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const loadPortfolio = useCallback(async () => {
+    try {
+      const [data, power] = await Promise.all([
         fetchPortfolioSummary(),
-        fetchBuyingPower().catch(() => ({
-          buying_power: 0,
-        })),
+        fetchBuyingPower().catch(() => null),
       ]);
 
       setSummary(data);
 
-      if (bpData && bpData.buying_power !== undefined) {
-        setBuyingPower(bpData.buying_power);
+      if (power?.buying_power !== undefined) {
+        setBuyingPower(power.buying_power);
       }
     } catch (err) {
-      console.error('Failed to fetch portfolio data:', err);
-      setErrorMessage('Failed to connect to backend service.');
+      setError(err.response?.data?.error || err.message);
     } finally {
       setLoading(false);
     }
   }, []);
 
+  const loadDividends = useCallback(async (force = false) => {
+    if (force) setRefreshingDividends(true);
+
+    try {
+      const data = await fetchPortfolioDividends(force);
+      setDividends(data);
+      setError('');
+    } catch (err) {
+      setError(
+        'Dividend fetch failed: ' +
+        (err.response?.data?.error || err.message)
+      );
+    } finally {
+      setRefreshingDividends(false);
+    }
+  }, []);
+
   const loadThresholds = useCallback(async () => {
     try {
-      const data = await fetchThresholds();
-      setThresholds(data || []);
+      setThresholds((await fetchThresholds()) || []);
     } catch (err) {
-      console.error('Failed to fetch thresholds:', err);
+      console.error('Failed to fetch alerts:', err);
     }
   }, []);
 
   useEffect(() => {
-    fetchPortfolioData();
+    loadPortfolio();
+    loadDividends();
     loadThresholds();
 
-    const interval = window.setInterval(() => {
-      fetchPortfolioData();
-    }, 15_000);
+    const timer = window.setInterval(() => {
+      loadPortfolio();
+    }, 15000);
 
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [fetchPortfolioData, loadThresholds]);
+    return () => window.clearInterval(timer);
+  }, [loadPortfolio, loadDividends, loadThresholds]);
 
-  const handleSaveBuyingPower = async () => {
-    try {
-      const updated = await updateBuyingPower(buyingPowerInput);
+  const holdings = summary?.holdings || [];
 
-      setBuyingPower(updated.buying_power);
-      setIsEditingBuyingPower(false);
-    } catch (err) {
-      console.error('Failed to update buying power:', err);
-      setErrorMessage('Failed to update buying power.');
-    }
-  };
+  const dividendByHolding = useMemo(() => {
+    const result = {};
 
-  const handleSort = (field) => {
-    if (sortField === field) {
-      setSortDirection((currentDirection) =>
-        currentDirection === 'asc' ? 'desc' : 'asc'
-      );
-
-      return;
+    for (const item of dividends?.holdings || []) {
+      if (!item.error) {
+        result[item.holding_id] = item;
+      }
     }
 
-    setSortField(field);
-    setSortDirection('desc');
-  };
+    return result;
+  }, [dividends]);
+
+  const dividendNetEUR = Number(dividends?.estimated_net_eur || 0);
+  const priceGainEUR = Number(summary?.total_gain_abs_eur || 0);
+
+  const combinedGainEUR = priceGainEUR + dividendNetEUR;
+
+  const totalCostEUR = holdings.reduce(
+    (sum, holding) =>
+      sum + Number(holding.total_cost_eur || 0),
+    0
+  );
+
+  const combinedPercent = totalCostEUR > 0
+    ? combinedGainEUR / totalCostEUR * 100
+    : null;
 
   const sortedHoldings = useMemo(() => {
-    if (!summary?.holdings) {
-      return [];
-    }
-
-    return [...summary.holdings].sort((a, b) => {
-      let valA;
-      let valB;
-
-      switch (sortField) {
-        case 'symbol':
-          valA = a.symbol;
-          valB = b.symbol;
-          break;
-
-        case 'shares':
-          valA = a.shares;
-          valB = b.shares;
-          break;
-
-        case 'avg_cost':
-          valA = a.avg_cost_share_usd || 0;
-          valB = b.avg_cost_share_usd || 0;
-          break;
-
-        case 'last_price':
-          valA = a.last_price_usd || 0;
-          valB = b.last_price_usd || 0;
-          break;
-
-        case 'market_value':
-          valA = a.market_value_usd || 0;
-          valB = b.market_value_usd || 0;
-          break;
-
-        case 'day_gain':
-          valA = a.day_gain_abs_usd || 0;
-          valB = b.day_gain_abs_usd || 0;
-          break;
-
-        case 'total_gain':
-          valA = a.total_gain_abs_usd || 0;
-          valB = b.total_gain_abs_usd || 0;
-          break;
-
-        default:
-          valA = a.market_value_usd || 0;
-          valB = b.market_value_usd || 0;
+    const valueFor = (holding) => {
+      if (sortField === 'dividends') {
+        return dividendByHolding[holding.id]?.estimated_net_eur || 0;
       }
 
-      if (typeof valA === 'string') {
-        return sortDirection === 'asc'
-          ? valA.localeCompare(valB)
-          : valB.localeCompare(valA);
+      if (sortField === 'combined_gain') {
+        return Number(holding.total_gain_abs_eur || 0) +
+          Number(dividendByHolding[holding.id]?.estimated_net_eur || 0);
       }
 
-      return sortDirection === 'asc'
-        ? valA - valB
-        : valB - valA;
-    });
-  }, [summary, sortField, sortDirection]);
-
-  const resetForm = () => {
-    setEditingId(null);
-    setSymbol('');
-    setShares('');
-    setPurchasePrice('');
-    setCurrency('USD');
-    setPurchaseDate('');
-  };
-
-  const startEdit = (holding) => {
-    setEditingId(holding.id);
-    setSymbol(holding.symbol);
-    setShares(String(holding.shares));
-    setPurchasePrice(String(holding.purchase_price ?? ''));
-    setCurrency(holding.purchase_price_currency || 'USD');
-    setPurchaseDate(fmtDate(holding.purchase_date));
-  };
-
-  const handleSubmitHolding = async (event) => {
-    event.preventDefault();
-
-    if (!symbol || !shares) {
-      return;
-    }
-
-    const payload = {
-      symbol: symbol.toUpperCase(),
-      shares: parseFloat(shares),
-      purchase_price: purchasePrice
-        ? parseFloat(purchasePrice)
-        : 0,
-      purchase_price_currency: currency,
-      purchase_date: purchaseDate
-        ? new Date(purchaseDate).toISOString()
-        : null,
+      return holding[sortField];
     };
 
-    setIsSubmitting(true);
-    setErrorMessage('');
+    return [...holdings].sort((a, b) => {
+      const x = valueFor(a);
+      const y = valueFor(b);
+
+      const comparison = typeof x === 'string'
+        ? x.localeCompare(String(y || ''))
+        : Number(x || 0) - Number(y || 0);
+
+      return sortDirection === 'asc' ? comparison : -comparison;
+    });
+  }, [holdings, dividendByHolding, sortField, sortDirection]);
+
+  const sortBy = (field) => {
+    if (sortField === field) {
+      setSortDirection((current) =>
+        current === 'asc' ? 'desc' : 'asc'
+      );
+    } else {
+      setSortField(field);
+      setSortDirection('desc');
+    }
+  };
+
+  const resetHolding = () => {
+    setEditingHoldingId(null);
+    setHoldingForm(initialHolding);
+  };
+
+  const saveHolding = async (event) => {
+    event.preventDefault();
+    setBusy(true);
 
     try {
-      if (editingId) {
-        await updateHolding(editingId, payload);
+      const payload = {
+        ...holdingForm,
+        symbol: holdingForm.symbol.trim().toUpperCase(),
+        shares: Number(holdingForm.shares),
+        purchase_price: Number(holdingForm.purchase_price || 0),
+        purchase_date: holdingForm.purchase_date
+          ? new Date(holdingForm.purchase_date).toISOString()
+          : null,
+      };
+
+      if (editingHoldingId) {
+        await updateHolding(editingHoldingId, payload);
       } else {
         await createHolding(payload);
       }
 
-      resetForm();
-      await fetchPortfolioData();
+      resetHolding();
+      await loadPortfolio();
+      await loadDividends(true);
+      setError('');
     } catch (err) {
-      console.error('Failed to save holding:', err);
-
-      setErrorMessage(
-        editingId
-          ? 'Failed to update holding.'
-          : 'Failed to add holding.'
-      );
+      setError(err.response?.data?.error || err.message);
     } finally {
-      setIsSubmitting(false);
+      setBusy(false);
     }
   };
 
-  const handleDeleteHolding = async (id) => {
+  const editHolding = (holding) => {
+    setEditingHoldingId(holding.id);
+    setHoldingForm({
+      symbol: holding.symbol,
+      shares: String(holding.shares),
+      purchase_price: String(holding.purchase_price || ''),
+      purchase_price_currency:
+        holding.purchase_price_currency || 'USD',
+      purchase_date: holding.purchase_date
+        ? String(holding.purchase_date).slice(0, 10)
+        : '',
+    });
+  };
+
+  const removeHolding = async (id) => {
+    if (!window.confirm('Delete this holding?')) return;
+
     try {
       await deleteHolding(id);
-
-      if (editingId === id) {
-        resetForm();
-      }
-
-      await fetchPortfolioData();
+      resetHolding();
+      await loadPortfolio();
+      await loadDividends(true);
     } catch (err) {
-      console.error('Failed to delete holding:', err);
-      setErrorMessage('Failed to delete holding.');
+      setError(err.response?.data?.error || err.message);
     }
   };
 
-  const renderSortArrow = (field) => {
-    if (sortField !== field) {
-      return (
-        <span className="text-gray-600 ml-1">
-          ↕
-        </span>
-      );
+  const saveBuyingPower = async () => {
+    try {
+      const updated = await updateBuyingPower(buyingPowerInput);
+      setBuyingPower(updated.buying_power);
+      setEditingBuyingPower(false);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
     }
-
-    return (
-      <span className="text-blue-400 ml-1">
-        {sortDirection === 'asc' ? '↑' : '↓'}
-      </span>
-    );
   };
 
   return (
     <div className="p-6 space-y-6 bg-gray-900 text-white min-h-screen">
-      {/* Buying Power & Summary Metric Bar */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-gray-800 p-4 rounded-xl border border-gray-700">
-        <div>
-          <div className="text-xs text-gray-400 uppercase font-semibold">
-            Total Value
-          </div>
+      <h2 className="text-xl font-bold">Portfolio</h2>
 
-          <div className="text-xl font-bold text-white">
-            ${fmt(summary?.total_value_usd)}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+        <div className="bg-gray-800 p-4 rounded-lg">
+          <div className="text-xs text-gray-400">Market Value USD</div>
+          <div className="text-xl font-bold">
+            {money(summary?.total_value_usd, 'USD')}
           </div>
         </div>
 
-        <div>
-          <div className="text-xs text-gray-400 uppercase font-semibold">
-            Buying Power
-          </div>
+        <div className="bg-gray-800 p-4 rounded-lg">
+          <div className="text-xs text-gray-400">Buying Power USD</div>
 
-          {isEditingBuyingPower ? (
-            <div className="flex items-center space-x-2 mt-1">
+          {editingBuyingPower ? (
+            <div className="flex gap-2">
               <input
                 type="number"
                 step="any"
+                className={`${inputClass} w-28`}
                 value={buyingPowerInput}
-                onChange={(event) =>
-                  setBuyingPowerInput(event.target.value)
-                }
-                className="bg-gray-700 text-white px-2 py-1 rounded text-sm w-28 outline-none focus:ring-1 focus:ring-blue-500"
+                onChange={(e) => setBuyingPowerInput(e.target.value)}
               />
-
-              <button
-                type="button"
-                onClick={handleSaveBuyingPower}
-                className="bg-blue-600 text-xs px-2 py-1 rounded hover:bg-blue-500"
-              >
-                Save
-              </button>
-
-              <button
-                type="button"
-                onClick={() =>
-                  setIsEditingBuyingPower(false)
-                }
-                className="text-gray-400 text-xs hover:text-white"
-              >
+              <button onClick={saveBuyingPower}>Save</button>
+              <button onClick={() => setEditingBuyingPower(false)}>
                 Cancel
               </button>
             </div>
           ) : (
-            <div className="flex items-center space-x-2">
-              <span className="text-xl font-bold text-emerald-400">
-                ${fmt(buyingPower)}
+            <div className="flex gap-3 items-center">
+              <span className="text-xl font-bold">
+                {money(buyingPower, 'USD')}
               </span>
-
               <button
-                type="button"
+                className="text-blue-400 text-sm"
                 onClick={() => {
                   setBuyingPowerInput(String(buyingPower));
-                  setIsEditingBuyingPower(true);
+                  setEditingBuyingPower(true);
                 }}
-                className="text-xs text-blue-400 hover:underline"
               >
                 Edit
               </button>
@@ -379,414 +332,276 @@ export const PortfolioTab = () => {
           )}
         </div>
 
-        <div>
-          <div className="text-xs text-gray-400 uppercase font-semibold">
-            Day Change
-          </div>
-
+        <div className="bg-gray-800 p-4 rounded-lg">
+          <div className="text-xs text-gray-400">Day Change USD</div>
           <GainDisplay
-            absValue={summary?.day_change_abs_usd}
-            pctValue={summary?.day_change_percent}
+            value={summary?.day_change_abs_usd}
+            percent={summary?.day_change_percent}
           />
         </div>
 
-        <div>
-          <div className="text-xs text-gray-400 uppercase font-semibold">
-            Total Return
+        <div className="bg-gray-800 p-4 rounded-lg">
+          <div className="text-xs text-gray-400">
+            Estimated Net Dividends EUR
           </div>
+          <div className="text-xl font-bold text-green-400">
+            {dividends ? money(dividendNetEUR) : 'Loading...'}
+          </div>
+        </div>
 
-          <GainDisplay
-            absValue={summary?.total_gain_abs_usd}
-            pctValue={summary?.total_gain_percent}
-          />
+        <div className="bg-gray-800 p-4 rounded-lg">
+          <div className="text-xs text-gray-400">
+            All-Time P&L incl. Dividends EUR
+          </div>
+          {dividends ? (
+            <GainDisplay
+              value={combinedGainEUR}
+              percent={combinedPercent}
+              currency="EUR"
+            />
+          ) : (
+            <span className="text-gray-400">Loading...</span>
+          )}
         </div>
       </div>
 
-      {/* Subtab Navigation */}
-      <div className="flex space-x-4 border-b border-gray-700 pb-2">
-        {['holdings', 'alerts', 'summary', 'heatmap'].map((tab) => (
+      {dividends && !dividends.complete && (
+        <div className="bg-amber-950 border border-amber-700 p-3 rounded text-sm">
+          Some dividends could not be calculated. The displayed
+          dividend and All-Time P&L estimates are incomplete.
+          Check the Dividends tab for details.
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 border-b border-gray-700 pb-3">
+        {[
+          ['holdings', 'Holdings'],
+          ['dividends', 'Dividends'],
+          ['alerts', 'Alerts'],
+          ['summary', 'Market Summary'],
+          ['heatmap', 'Market Heatmap'],
+        ].map(([key, label]) => (
           <button
-            key={tab}
+            key={key}
             type="button"
-            onClick={() => setActiveSubTab(tab)}
-            className={`px-4 py-2 text-sm font-medium capitalize rounded-t-lg transition-colors ${
-              activeSubTab === tab
-                ? 'bg-gray-800 text-blue-400 border-b-2 border-blue-400'
-                : 'text-gray-400 hover:text-white'
+            onClick={() => setActiveSubTab(key)}
+            className={`px-4 py-2 rounded text-sm ${
+              activeSubTab === key
+                ? 'bg-blue-600'
+                : 'bg-gray-800 hover:bg-gray-700'
             }`}
           >
-            {tab === 'heatmap'
-              ? 'Market Heatmap'
-              : tab === 'summary'
-                ? 'Market Summary'
-                : tab}
+            {label}
           </button>
         ))}
       </div>
 
-      {errorMessage && (
-        <div className="bg-red-900/50 border border-red-500 text-red-200 px-4 py-2 rounded text-sm">
-          {errorMessage}
+      {error && (
+        <div className="bg-red-950 border border-red-700 p-3 rounded">
+          {error}
         </div>
       )}
 
-      {/* Holdings Subtab */}
+      {loading && !summary && (
+        <p className="text-gray-400">Loading portfolio...</p>
+      )}
+
       {activeSubTab === 'holdings' && (
-        <div className="space-y-6">
+        <div className="space-y-5">
           <form
-            onSubmit={handleSubmitHolding}
-            className="bg-gray-800 p-4 rounded-lg flex flex-wrap items-end gap-4 border border-gray-700"
+            onSubmit={saveHolding}
+            className="bg-gray-800 p-4 rounded flex flex-wrap gap-3 items-end"
           >
-            {editingId && (
-              <div className="w-full text-xs text-blue-400 font-semibold">
-                Editing holding #{editingId} —{' '}
-
-                <button
-                  type="button"
-                  onClick={resetForm}
-                  className="underline hover:text-blue-300"
-                >
-                  cancel
-                </button>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">
-                Ticker Symbol
-              </label>
-
+            <label className="text-xs">
+              Symbol
               <input
-                type="text"
-                placeholder="e.g. AMD"
-                value={symbol}
-                onChange={(event) =>
-                  setSymbol(event.target.value)
-                }
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
                 required
+                className={`${inputClass} block mt-1 w-28`}
+                value={holdingForm.symbol}
+                onChange={(e) => setHoldingForm({
+                  ...holdingForm,
+                  symbol: e.target.value,
+                })}
               />
-            </div>
+            </label>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">
-                Shares
-              </label>
+            <label className="text-xs">
+              Shares
+              <input
+                required
+                type="number"
+                step="any"
+                min="0"
+                className={`${inputClass} block mt-1 w-28`}
+                value={holdingForm.shares}
+                onChange={(e) => setHoldingForm({
+                  ...holdingForm,
+                  shares: e.target.value,
+                })}
+              />
+            </label>
 
+            <label className="text-xs">
+              Purchase Price
               <input
                 type="number"
                 step="any"
-                placeholder="0"
-                value={shares}
-                onChange={(event) =>
-                  setShares(event.target.value)
-                }
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
-                required
+                className={`${inputClass} block mt-1 w-28`}
+                value={holdingForm.purchase_price}
+                onChange={(e) => setHoldingForm({
+                  ...holdingForm,
+                  purchase_price: e.target.value,
+                })}
               />
-            </div>
+            </label>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">
-                Purchase Price
-              </label>
-
-              <input
-                type="number"
-                step="any"
-                placeholder="0.00"
-                value={purchasePrice}
-                onChange={(event) =>
-                  setPurchasePrice(event.target.value)
-                }
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">
-                Currency
-              </label>
-
+            <label className="text-xs">
+              Currency
               <select
-                value={currency}
-                onChange={(event) =>
-                  setCurrency(event.target.value)
-                }
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                className={`${inputClass} block mt-1`}
+                value={holdingForm.purchase_price_currency}
+                onChange={(e) => setHoldingForm({
+                  ...holdingForm,
+                  purchase_price_currency: e.target.value,
+                })}
               >
-                <option value="USD">USD ($)</option>
-                <option value="EUR">EUR (€)</option>
+                <option value="USD">USD</option>
+                <option value="EUR">EUR</option>
               </select>
-            </div>
+            </label>
 
-            <div>
-              <label className="block text-xs font-semibold text-gray-400 mb-1">
-                Purchase Date
-              </label>
-
+            <label className="text-xs">
+              First Purchase Date
               <input
                 type="date"
-                value={purchaseDate}
-                onChange={(event) =>
-                  setPurchaseDate(event.target.value)
-                }
-                className="bg-gray-700 text-white px-3 py-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                className={`${inputClass} block mt-1`}
+                value={holdingForm.purchase_date}
+                onChange={(e) => setHoldingForm({
+                  ...holdingForm,
+                  purchase_date: e.target.value,
+                })}
               />
-            </div>
+            </label>
 
             <button
-              type="submit"
-              disabled={isSubmitting}
-              className={`px-4 py-2 rounded text-sm font-semibold transition cursor-pointer disabled:opacity-50 ${
-                editingId
-                  ? 'bg-amber-600 hover:bg-amber-500'
-                  : 'bg-blue-600 hover:bg-blue-500'
-              } text-white`}
+              disabled={busy}
+              className="bg-blue-600 px-4 py-2 rounded text-sm disabled:opacity-50"
             >
-              {isSubmitting
-                ? 'Saving...'
-                : editingId
-                  ? 'Update Holding'
-                  : 'Add Holding'}
+              {editingHoldingId ? 'Update Holding' : 'Add Holding'}
             </button>
+
+            {editingHoldingId && (
+              <button type="button" onClick={resetHolding}>
+                Cancel
+              </button>
+            )}
           </form>
 
-          {loading && !summary ? (
-            <div className="text-gray-400">
-              Loading holdings...
-            </div>
-          ) : (
-            <div className="overflow-x-auto bg-gray-800 rounded-lg border border-gray-700">
-              <table className="w-full text-left text-sm text-gray-300">
-                <thead className="bg-gray-700 text-gray-400 uppercase text-xs select-none">
-                  <tr>
-                    <th
-                      onClick={() => handleSort('symbol')}
-                      className="px-6 py-3 cursor-pointer hover:text-white"
-                    >
-                      Symbol {renderSortArrow('symbol')}
-                    </th>
-
-                    <th
-                      onClick={() => handleSort('shares')}
-                      className="px-6 py-3 cursor-pointer hover:text-white"
-                    >
-                      Shares {renderSortArrow('shares')}
-                    </th>
-
-                    <th
-                      onClick={() => handleSort('avg_cost')}
-                      className="px-6 py-3 cursor-pointer hover:text-white"
-                    >
-                      Avg Cost {renderSortArrow('avg_cost')}
-                    </th>
-
-                    <th
-                      onClick={() => handleSort('last_price')}
-                      className="px-6 py-3 cursor-pointer hover:text-white"
-                    >
-                      Last Price {renderSortArrow('last_price')}
-                    </th>
-
-                    <th
-                      onClick={() => handleSort('market_value')}
-                      className="px-6 py-3 cursor-pointer hover:text-white"
-                    >
-                      Market Value {renderSortArrow('market_value')}
-                    </th>
-
-                    <th
-                      onClick={() => handleSort('day_gain')}
-                      className="px-6 py-3 cursor-pointer hover:text-white"
-                    >
-                      Day Gain ($ / %) {renderSortArrow('day_gain')}
-                    </th>
-
-                    <th
-                      onClick={() => handleSort('total_gain')}
-                      className="px-6 py-3 cursor-pointer hover:text-white"
-                    >
-                      Total Gain ($ / %) {renderSortArrow('total_gain')}
-                    </th>
-
-                    <th className="px-6 py-3 text-right">
-                      Actions
-                    </th>
-                  </tr>
-                </thead>
-
-                <tbody className="divide-y divide-gray-700">
-                  {sortedHoldings.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan="8"
-                        className="px-6 py-4 text-center text-gray-500"
-                      >
-                        No holdings found.
-                      </td>
-                    </tr>
-                  ) : (
-                    sortedHoldings.map((holding) => (
-                      <tr
-                        key={holding.id}
-                        className={`hover:bg-gray-700/50 ${
-                          editingId === holding.id
-                            ? 'bg-amber-950/30'
-                            : ''
-                        }`}
-                      >
-                        <td className="px-6 py-4 font-bold text-white">
-                          {holding.symbol}
-                        </td>
-
-                        <td className="px-6 py-4">
-                          {fmt(holding.shares, 4)}
-                        </td>
-
-                        <td className="px-6 py-4">
-                          {holding.avg_cost_share_usd
-                            ? `$${fmt(
-                                holding.avg_cost_share_usd
-                              )}`
-                            : '--'}
-                        </td>
-
-                        <td className="px-6 py-4">
-                          {holding.quote_fetch_error ? (
-                            <span className="text-red-400 italic text-xs">
-                              error
-                            </span>
-                          ) : (
-                            `$${fmt(holding.last_price_usd)}`
-                          )}
-                        </td>
-
-                        <td className="px-6 py-4 font-semibold text-white">
-                          ${fmt(holding.market_value_usd)}
-                        </td>
-
-                        <td className="px-6 py-4">
-                          <GainDisplay
-                            absValue={
-                              holding.day_gain_abs_usd
-                            }
-                            pctValue={
-                              holding.day_gain_percent
-                            }
-                          />
-                        </td>
-
-                        <td className="px-6 py-4">
-                          <GainDisplay
-                            absValue={
-                              holding.total_gain_abs_usd
-                            }
-                            pctValue={
-                              holding.total_gain_percent
-                            }
-                          />
-                        </td>
-
-                        <td className="px-6 py-4 text-right space-x-3 whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() =>
-                              startEdit(holding)
-                            }
-                            className="text-blue-400 hover:text-blue-300 font-medium cursor-pointer"
-                          >
-                            Edit
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() =>
-                              handleDeleteHolding(
-                                holding.id
-                              )
-                            }
-                            className="text-red-400 hover:text-red-300 font-medium cursor-pointer"
-                          >
-                            Delete
-                          </button>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Alerts Subtab */}
-      {activeSubTab === 'alerts' && (
-        <div className="bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
-          <div className="px-5 py-4 border-b border-gray-700">
-            <h2 className="text-lg font-semibold text-white">
-              Price Alerts
-            </h2>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm text-gray-300">
-              <thead className="bg-gray-700 text-gray-400 uppercase text-xs">
+          <div className="overflow-x-auto bg-gray-800 rounded">
+            <table className="w-full text-left text-sm">
+              <thead className="bg-gray-700 text-gray-300">
                 <tr>
-                  <th className="px-6 py-3">Symbol</th>
-                  <th className="px-6 py-3">Condition</th>
-                  <th className="px-6 py-3">Target</th>
-                  <th className="px-6 py-3">Status</th>
+                  {[
+                    ['symbol', 'Symbol'],
+                    ['shares', 'Shares'],
+                    ['avg_cost_share_usd', 'Avg Cost USD'],
+                    ['last_price_usd', 'Last Price USD'],
+                    ['market_value_usd', 'Market Value USD'],
+                    ['day_gain_abs_usd', 'Day Gain USD'],
+                    ['dividends', 'Est. Net Dividends EUR'],
+                    ['combined_gain', 'Total P&L EUR'],
+                  ].map(([key, label]) => (
+                    <th
+                      key={key}
+                      onClick={() => sortBy(key)}
+                      className="p-3 cursor-pointer whitespace-nowrap"
+                    >
+                      {label}
+                      {sortField === key
+                        ? (sortDirection === 'asc' ? ' ↑' : ' ↓')
+                        : ''}
+                    </th>
+                  ))}
+                  <th className="p-3">Actions</th>
                 </tr>
               </thead>
 
-              <tbody className="divide-y divide-gray-700">
-                {thresholds.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan="4"
-                      className="px-6 py-6 text-center text-gray-500"
-                    >
-                      No price alerts configured.
-                    </td>
-                  </tr>
-                ) : (
-                  thresholds.map((threshold) => (
-                    <tr
-                      key={threshold.id}
-                      className="hover:bg-gray-700/40"
-                    >
-                      <td className="px-6 py-4 font-semibold text-white">
-                        {threshold.symbol}
-                      </td>
+              <tbody>
+                {sortedHoldings.map((h) => {
+                  const d = dividendByHolding[h.id];
+                  const net = Number(d?.estimated_net_eur || 0);
+                  const combined =
+                    Number(h.total_gain_abs_eur || 0) + net;
 
-                      <td className="px-6 py-4 capitalize">
-                        {threshold.condition}
-                      </td>
+                  const dividendError = dividends?.holdings?.find(
+                    (item) => item.holding_id === h.id
+                  )?.error;
 
-                      <td className="px-6 py-4">
-                        ${fmt(
-                          threshold.target_price ??
-                            threshold.target
+                  return (
+                    <tr key={h.id} className="border-t border-gray-700">
+                      <td className="p-3 font-bold">{h.symbol}</td>
+                      <td className="p-3">{fmt(h.shares, 4)}</td>
+                      <td className="p-3">
+                        {money(h.avg_cost_share_usd, 'USD')}
+                      </td>
+                      <td className="p-3">
+                        {h.quote_fetch_error
+                          ? 'Quote unavailable'
+                          : money(h.last_price_usd, 'USD')}
+                      </td>
+                      <td className="p-3">
+                        {money(h.market_value_usd, 'USD')}
+                      </td>
+                      <td className="p-3">
+                        <GainDisplay
+                          value={h.day_gain_abs_usd}
+                          percent={h.day_gain_percent}
+                        />
+                      </td>
+                      <td className="p-3">
+                        {dividendError ? (
+                          <span className="text-amber-400" title={dividendError}>
+                            Unavailable
+                          </span>
+                        ) : dividends ? (
+                          <span className="text-green-400">
+                            {money(net)}
+                          </span>
+                        ) : (
+                          '--'
                         )}
                       </td>
-
-                      <td className="px-6 py-4">
-                        <span
-                          className={
-                            threshold.enabled
-                              ? 'text-green-400'
-                              : 'text-gray-500'
-                          }
+                      <td className="p-3">
+                        {dividends ? (
+                          <GainDisplay value={combined} currency="EUR" />
+                        ) : (
+                          '--'
+                        )}
+                      </td>
+                      <td className="p-3 whitespace-nowrap">
+                        <button
+                          onClick={() => editHolding(h)}
+                          className="text-blue-400 mr-3"
                         >
-                          {threshold.enabled
-                            ? 'Enabled'
-                            : 'Disabled'}
-                        </span>
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => removeHolding(h.id)}
+                          className="text-red-400"
+                        >
+                          Delete
+                        </button>
                       </td>
                     </tr>
-                  ))
+                  );
+                })}
+
+                {sortedHoldings.length === 0 && (
+                  <tr>
+                    <td colSpan="9" className="p-5 text-center text-gray-400">
+                      No holdings found.
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -794,17 +609,143 @@ export const PortfolioTab = () => {
         </div>
       )}
 
-      {/* Market Summary Subtab */}
-      {activeSubTab === 'summary' && (
-        <MarketSummaryTab />
+      {activeSubTab === 'dividends' && (
+        <div className="space-y-5">
+          <div className="flex flex-wrap justify-between items-center gap-3">
+            <div>
+              <h3 className="text-lg font-bold">Yahoo Dividend History</h3>
+              <p className="text-xs text-gray-400">
+                Calculated from your first purchase date using current shares.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              disabled={refreshingDividends}
+              onClick={() => loadDividends(true)}
+              className="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded text-sm disabled:opacity-50"
+            >
+              {refreshingDividends
+                ? 'Fetching Yahoo data...'
+                : 'Refresh Yahoo Dividends'}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {[
+              ['Gross Dividends EUR', dividends?.gross_eur],
+              ['Estimated Tax EUR (28%)', dividends?.estimated_tax_eur],
+              ['Estimated Net Dividends EUR', dividends?.estimated_net_eur],
+            ].map(([label, amount]) => (
+              <div key={label} className="bg-gray-800 rounded p-4">
+                <div className="text-xs text-gray-400">{label}</div>
+                <div className="text-xl font-bold">
+                  {dividends ? money(amount) : '--'}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <p className="text-xs text-amber-300">
+            These are estimated entitlements based on Yahoo ex-dividend
+            events, not verified broker payments. The 28% Portuguese
+            tax assumption does not account for actual foreign withholding,
+            treaty relief or tax credits. USD dividends use the current
+            EUR conversion rate.
+          </p>
+
+          <div className="space-y-3">
+            {(dividends?.holdings || []).map((h) => (
+              <details
+                key={h.holding_id}
+                className="bg-gray-800 rounded border border-gray-700"
+              >
+                <summary className="p-4 cursor-pointer">
+                  <span className="font-bold mr-3">{h.symbol}</span>
+                  <span className="text-gray-300">
+                    {h.error
+                      ? h.error
+                      : `${h.events_count} events · ${money(h.estimated_net_eur)} estimated net`}
+                  </span>
+                </summary>
+
+                {!h.error && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-gray-700">
+                        <tr>
+                          <th className="p-3">Ex-dividend date</th>
+                          <th className="p-3">Per share</th>
+                          <th className="p-3">Eligible shares (assumed)</th>
+                          <th className="p-3">Gross</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(h.events || []).map((event, index) => (
+                          <tr
+                            key={`${event.ex_date}-${index}`}
+                            className="border-t border-gray-700"
+                          >
+                            <td className="p-3">{event.ex_date}</td>
+                            <td className="p-3">
+                              {fmt(event.amount_per_share, 4)} {h.currency}
+                            </td>
+                            <td className="p-3">{fmt(h.shares, 4)}</td>
+                            <td className="p-3">
+                              {fmt(
+                                event.amount_per_share * h.shares
+                              )} {h.currency}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </details>
+            ))}
+          </div>
+        </div>
       )}
 
-      {/* Market Heatmap Subtab */}
-      {activeSubTab === 'heatmap' && (
-        <MarketHeatmap />
+      {activeSubTab === 'alerts' && (
+        <div className="bg-gray-800 rounded overflow-x-auto">
+          <table className="w-full text-sm text-left">
+            <thead className="bg-gray-700">
+              <tr>
+                <th className="p-3">Symbol</th>
+                <th className="p-3">Condition</th>
+                <th className="p-3">Target</th>
+                <th className="p-3">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {thresholds.map((t) => (
+                <tr key={t.id} className="border-t border-gray-700">
+                  <td className="p-3">{t.symbol}</td>
+                  <td className="p-3">{t.condition}</td>
+                  <td className="p-3">
+                    {money(t.target_price ?? t.target, 'USD')}
+                  </td>
+                  <td className="p-3">
+                    {t.enabled ? 'Enabled' : 'Disabled'}
+                  </td>
+                </tr>
+              ))}
+              {thresholds.length === 0 && (
+                <tr>
+                  <td colSpan="4" className="p-5 text-center">
+                    No price alerts configured.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       )}
+
+      {activeSubTab === 'summary' && <MarketSummaryTab />}
+      {activeSubTab === 'heatmap' && <MarketHeatmap />}
     </div>
   );
-};
-
-export default PortfolioTab;
+}
