@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 
 	"autoclicker/pkg/models"
 )
@@ -18,17 +19,24 @@ type pythonMarketResult struct {
 }
 
 func ProcessMarketPDF(pdfPath string) (models.MarketDocumentResult, error) {
-	pythonExecutable := filepath.Join(
-		"market_processor",
-		"venv",
-		"Scripts",
-		"python.exe",
-	)
+	pythonExecutable := os.Getenv("PYTHON_EXECUTABLE")
 
+	if pythonExecutable == "" {
+		if runtime.GOOS == "windows" {
+			pythonExecutable = filepath.Join(
+				"market_processor",
+				"venv",
+				"Scripts",
+				"python.exe",
+			)
+		} else {
+			pythonExecutable = "python3"
+		}
+	}
 
 	scriptPath, err := getMarketProcessorPath()
 	if err != nil {
-		return models.MarketDocumentResult{}, err 
+		return models.MarketDocumentResult{}, err
 	}
 
 	cmd := exec.Command(
@@ -68,24 +76,26 @@ func ProcessMarketPDF(pdfPath string) (models.MarketDocumentResult, error) {
 }
 
 func getMarketProcessorPath() (string, error) {
-	candidates := []string{
-		filepath.Join("market_processor", "market_processor.py"),
-		filepath.Join(".", "market_processor", "market_processor.py"),
-	}
-
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			absolutePath, err := filepath.Abs(candidate)
-			if err != nil {
-				return "", fmt.Errorf("failed to resolve market processor path: %w", err)
-			}
-
-			return absolutePath, nil
-		}
-	}
-
-	return "", fmt.Errorf(
-		"market processor script not found; expected at %s",
-		filepath.Join("market_processor", "market_processor.py"),
+	scriptPath := filepath.Join(
+		"market_processor",
+		"market_processor.py",
 	)
+
+	absolutePath, err := filepath.Abs(scriptPath)
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed to resolve market processor path: %w",
+			err,
+		)
+	}
+
+	if _, err := os.Stat(absolutePath); err != nil {
+		return "", fmt.Errorf(
+			"market processor script not found at %s: %w",
+			absolutePath,
+			err,
+		)
+	}
+
+	return absolutePath, nil
 }
