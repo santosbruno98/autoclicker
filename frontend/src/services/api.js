@@ -3,34 +3,16 @@ import axios from 'axios';
 
 const API = axios.create({
   baseURL: '/api/v1',
-  withCredentials: true,
-  headers: {
-    'X-Requested-With': 'XMLHttpRequest',
-  },
 });
 
-API.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      window.dispatchEvent(new Event('auth:expired'));
-    }
-    return Promise.reject(error);
-  }
-);
-
-// Process APIs
-export const fetchProcesses = async (nameQuery = '') => {
-  const url = nameQuery
-    ? `/processes?name=${encodeURIComponent(nameQuery)}`
-    : '/processes';
-  return (await API.get(url)).data;
-};
+export const fetchProcesses = async (nameQuery = '') =>
+  (await API.get('/processes', {
+    params: nameQuery ? { name: nameQuery } : {},
+  })).data;
 
 export const verifyPID = async (pid) =>
   (await API.get(`/processes/verify/${pid}`)).data;
 
-// Task APIs
 export const fetchTasks = async () =>
   (await API.get('/tasks')).data;
 
@@ -43,7 +25,6 @@ export const updateTask = async (id, payload) =>
 export const deleteTask = async (id) =>
   (await API.delete(`/tasks/${id}`)).data;
 
-// Automation APIs
 export const fetchAutomationStatus = async () =>
   (await API.get('/automation/status')).data;
 
@@ -56,7 +37,6 @@ export const startJob = async (payload) =>
 export const stopJob = async () =>
   (await API.post('/automation/stop')).data;
 
-// Notes APIs
 export const fetchNotes = async () =>
   (await API.get('/notes')).data;
 
@@ -69,7 +49,6 @@ export const updateNote = async (id, payload) =>
 export const deleteNote = async (id) =>
   (await API.delete(`/notes/${id}`)).data;
 
-// Portfolio APIs
 export const fetchHoldings = async () =>
   (await API.get('/portfolio/holdings')).data;
 
@@ -91,14 +70,11 @@ export const fetchPortfolioHistory = async () =>
 export const fetchBuyingPower = async () =>
   (await API.get('/portfolio/buyingPower')).data;
 
-export const updateBuyingPower = async (buyingPower) =>
-  (
-    await API.put('/portfolio/buyingPower', {
-      buying_power: parseFloat(buyingPower),
-    })
-  ).data;
+export const updateBuyingPower = async (value) =>
+  (await API.put('/portfolio/buyingPower', {
+    buying_power: Number(value),
+  })).data;
 
-// Alerts APIs
 export const fetchThresholds = async () =>
   (await API.get('/portfolio/thresholds')).data;
 
@@ -114,55 +90,27 @@ export const updateThreshold = async (id, payload) =>
 export const deleteThreshold = async (id) =>
   (await API.delete(`/portfolio/thresholds/${id}`)).data;
 
-// Market APIs
 export const processMarketDocument = async (file) => {
   const formData = new FormData();
   formData.append('file', file);
-  return (await API.post('/market/documents', formData)).data;
+
+  return (await API.post('/market/documents', formData, {
+    timeout: 300_000,
+  })).data;
 };
 
 export const fetchMarketQuotes = async (symbols) => {
-  if (!symbols || symbols.length === 0) {
-    return { quotes: {} };
-  }
-
-  const uniqueSymbols = [
+  const unique = [
     ...new Set(
-      symbols
+      (symbols || [])
         .map((symbol) => String(symbol).trim().toUpperCase())
         .filter(Boolean)
     ),
   ];
 
-  if (uniqueSymbols.length === 0) {
-    return { quotes: {} };
-  }
+  if (!unique.length) return { quotes: {}, errors: {} };
 
-  return (
-    await API.get('/market/quotes', {
-      params: { symbols: uniqueSymbols.join(',') },
-    })
-  ).data;
-};
-
-// Dividend APIs
-export const fetchDividends = async () =>
-  (await API.get('/portfolio/dividends')).data;
-
-export const createDividend = async (payload) =>
-  (await API.post('/portfolio/dividends', payload)).data;
-
-export const updateDividend = async (id, payload) =>
-  (await API.put(`/portfolio/dividends/${id}`, payload)).data;
-
-export const deleteDividend = async (id) =>
-  (await API.delete(`/portfolio/dividends/${id}`)).data;
-
-
-export const fetchPortfolioDividends = async (forceRefresh = false) => {
-  const response = await API.get('/portfolio/dividends', {
-    params: forceRefresh ? { refresh: 'true' } : {},
-  });
-
-  return response.data;
+  return (await API.get('/market/quotes', {
+    params: { symbols: unique.join(',') },
+  })).data;
 };
