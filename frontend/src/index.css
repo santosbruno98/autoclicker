@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,20 +7,130 @@
 
 :root {
   color-scheme: dark;
+  font-family: 'Inter', sans-serif;
+  background: #090f1c;
+  color: #e2e8f0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
 }
 
 body {
   margin: 0;
-  background-color: #0B0D0F;
-  color: #E8E6E1;
-  font-family: 'JetBrains Mono', monospace;
+  min-height: 100vh;
+  background: #090f1c;
   -webkit-font-smoothing: antialiased;
 }
 
-@keyframes pulse-signal {
-  0%, 100% { opacity: 0.3; transform: scaleY(0.4); }
-  50% { opacity: 1; transform: scaleY(1); }
+button,
+input,
+select,
+textarea {
+  font: inherit;
 }
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@layer components {
+  .terminal-card {
+    @apply rounded-2xl border border-white/10 bg-[#131f32];
+  }
+
+  .terminal-input {
+    @apply block w-full min-w-0 rounded-lg border border-white/10
+      bg-[#0c1626] px-3 py-2.5 text-sm text-white outline-none
+      transition focus:border-cyan-500/60 focus:ring-1
+      focus:ring-cyan-500/30;
+  }
+
+  .terminal-label {
+    @apply flex min-w-0 flex-col gap-2 text-xs font-medium text-slate-400;
+  }
+
+  .terminal-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg
+      bg-cyan-500 px-4 py-2.5 text-sm font-semibold text-[#07121d]
+      transition hover:bg-cyan-400;
+  }
+
+  .terminal-button-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg
+      border border-white/10 bg-white/5 px-4 py-2.5 text-sm
+      font-medium text-slate-200 transition hover:bg-white/10;
+  }
+
+  .terminal-chip {
+    @apply inline-flex items-center rounded-full border border-white/10
+      bg-white/5 px-2.5 py-1 text-xs text-slate-300;
+  }
+
+  .terminal-stat {
+    @apply flex flex-col gap-2 rounded-xl border border-white/10
+      bg-[#0c1626] p-3;
+  }
+
+  .terminal-stat span {
+    @apply text-xs text-slate-500;
+  }
+
+  .terminal-stat strong {
+    @apply text-sm font-semibold text-white;
+  }
+
+  .terminal-table {
+    @apply w-full min-w-[700px] border-collapse text-left text-sm;
+  }
+
+  .terminal-table thead {
+    @apply bg-white/[0.03] text-xs uppercase tracking-wide text-slate-500;
+  }
+
+  .terminal-table th {
+    @apply whitespace-nowrap border-b border-white/10 px-4 py-3 font-semibold;
+  }
+
+  .terminal-table td {
+    @apply border-b border-white/5 px-4 py-4 text-slate-300;
+  }
+
+  .terminal-table tbody tr {
+    @apply transition hover:bg-white/[0.03];
+  }
+}
+
+@keyframes pulse-signal {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scaleY(0.4);
+  }
+  50% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
 .signal-bar {
   animation: pulse-signal 1s ease-in-out infinite;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 8px;
 }
