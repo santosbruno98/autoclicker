@@ -114,7 +114,6 @@ func main() {
 
 		api.GET("/portfolio/dividends", handlers.GetPortfolioDividends)
 
-
 		// Market APIs
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
@@ -127,6 +126,8 @@ func main() {
 		api.DELETE("/portfolio/thresholds/:id", handlers.DeleteThreshold)
 
 		api.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
+
+		api.GET("/market/benchmark/history", handlers.GetBenchmarkHistory)
 
 	}
 
