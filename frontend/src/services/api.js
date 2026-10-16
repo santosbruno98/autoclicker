@@ -114,3 +114,7 @@ export const fetchMarketQuotes = async (symbols) => {
     params: { symbols: unique.join(',') },
   })).data;
 };
+
+
+export const fetchBenchmarkHistory = async () =>
+  (await API.get('/market/benchmark/history')).data;

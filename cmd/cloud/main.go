@@ -100,6 +100,9 @@ func main() {
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
 
+		
+		api.GET("/market/benchmark/history", handlers.GetBenchmarkHistory)
+
 	}
 
 	// Grafana webhook
