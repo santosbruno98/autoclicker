@@ -76,6 +76,9 @@ func main() {
 	database.InitCoreDB()
 	database.InitNotesDB()
 	database.InitPortfolioDB()
+	if err := database.InitMarketDB(); err != nil {
+		log.Fatalf("Failed to initialize market database: %v", err)
+	}
 
 	r := gin.Default()
 	r.Use(CORSMiddleware())
@@ -179,6 +182,7 @@ func main() {
 	closeDB("portfolioDB", database.PortfolioDB)
 	closeDB("notesDB", database.NotesDB)
 	closeDB("autoclicker", database.DB)
+	database.CloseMarketDB()
 
 	//TODO: Put the API logs into a topic and the application logs into another topic, using wildcard binding strings.
 	// TODO: Topic exchanges route dynamically based on routing keys containing dot-seperated words, allowing systems to selectively bind queues using wildcards
