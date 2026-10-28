@@ -1,9 +1,8 @@
-
 package database
 
 import (
+	"errors"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -18,7 +17,7 @@ var RouteDB *gorm.DB
 func InitRouteDB() error {
 	dsn := os.Getenv("ROUTES_DATABASE_URL")
 	if dsn == "" {
-		return fmt.Errorf("ROUTES_DATABASE_URL is not configured")
+		return errors.New("ROUTES_DATABASE_URL is missing")
 	}
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
@@ -34,19 +33,20 @@ func InitRouteDB() error {
 	sqlDB.SetMaxOpenConns(5)
 	sqlDB.SetMaxIdleConns(2)
 	sqlDB.SetConnMaxLifetime(30 * time.Minute)
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 
 	if err := db.AutoMigrate(
 		&models.RoutePlan{},
 		&models.RouteStop{},
+		&models.RouteService{},
 		&models.RouteSegment{},
 		&models.RouteOptimizationCache{},
+		&models.RouteImageCache{},
+		&models.RouteGeocodeCache{},
 	); err != nil {
 		sqlDB.Close()
 		return fmt.Errorf("migrate routes database: %w", err)
 	}
 
 	RouteDB = db
-	log.Println("Successfully connected to Neon routes database")
 	return nil
 }

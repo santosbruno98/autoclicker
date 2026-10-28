@@ -21,6 +21,13 @@ osrm-extract \
   -p /opt/car.lua \
   guarda.osm.pbf
 
+osrm-routed \
+  --algorithm ch \
+  --port 5000 \
+  --max-table-size 200 \
+  --max-viaroute-size 200 \
+  /data/guarda.osrm
+  
 osrm-contract guarda.osrm
 
 rm -f portugal.osm.pbf guarda.osm.pbf

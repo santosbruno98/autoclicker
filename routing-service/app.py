@@ -1,28 +1,48 @@
 
-import os
+import asyncio
 import hmac
+import json
 import math
-import httpx
+import os
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-app = FastAPI(title="MyPlatform Routing Service")
+app = FastAPI(title="Guarda Routing Service")
 
-OSRM_URL = os.getenv("OSRM_URL", "http://127.0.0.1:5000")
 API_KEY = os.getenv("ROUTING_API_KEY", "")
+VROOM_BIN = os.getenv("VROOM_BIN", "/usr/local/bin/vroom")
+OSRM_HOST = os.getenv("OSRM_HOST", "127.0.0.1")
+OSRM_PORT = os.getenv("OSRM_PORT", "5000")
 
 
 class OptimizeRequest(BaseModel):
     coordinates: list[tuple[float, float]] = Field(
-        min_length=2, max_length=150
+        min_length=2,
+        max_length=150
     )
     round_trip: bool = False
 
 
-def check_coordinates(coordinates):
-    for lon, lat in coordinates:
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
+@app.post("/optimize")
+async def optimize(
+    request: OptimizeRequest,
+    authorization: str = Header(default="")
+):
+    if not API_KEY or not hmac.compare_digest(
+        authorization,
+        "Bearer " + API_KEY
+    ):
+        raise HTTPException(401, "Unauthorized")
+
+    points = request.coordinates
+
+    for lon, lat in points:
         if not (
             math.isfinite(lon)
             and math.isfinite(lat)
@@ -31,132 +51,115 @@ def check_coordinates(coordinates):
         ):
             raise HTTPException(400, "Invalid coordinates")
 
+    # Index 0 is the depot. All remaining coordinates
+    # are delivery/collection destinations.
+    vehicle = {
+        "id": 1,
+        "profile": "car",
+        "start": list(points[0])
+    }
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+    if request.round_trip:
+        vehicle["end"] = list(points[0])
 
+    jobs = [
+        {
+            "id": index,
+            "location": list(points[index]),
+            "service": 0
+        }
+        for index in range(1, len(points))
+    ]
 
-@app.post("/optimize")
-async def optimize(
-    payload: OptimizeRequest,
-    authorization: str = Header(default="")
-):
-    expected = "Bearer " + API_KEY
-    if not API_KEY or not hmac.compare_digest(
-        authorization, expected
-    ):
-        raise HTTPException(401, "Unauthorized")
+    payload = {
+        "vehicles": [vehicle],
+        "jobs": jobs
+    }
 
-    points = payload.coordinates
-    check_coordinates(points)
+    command = [
+        VROOM_BIN,
+        "-r", "osrm",
+        "-a", f"car:{OSRM_HOST}",
+        "-p", f"car:{OSRM_PORT}",
+        "-g",
+        "-l", "30",
+        "-t", "2",
+        "-x", "3"
+    ]
 
-    coords = ";".join(
-        f"{lon:.6f},{lat:.6f}" for lon, lat in points
-    )
-
-    url = f"{OSRM_URL}/table/v1/driving/{coords}"
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        try:
-            response = await client.get(
-                url,
-                params={"annotations": "duration,distance"}
-            )
-            response.raise_for_status()
-            matrix = response.json()
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                502, "OSRM matrix request failed"
-            ) from exc
-
-    if matrix.get("code") != "Ok":
-        raise HTTPException(
-            422, "OSRM could not calculate all road connections"
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
         )
 
-    durations = matrix["durations"]
-    distances = matrix["distances"]
-    n = len(points)
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(
+                json.dumps(payload).encode("utf-8")
+            ),
+            timeout=60
+        )
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        raise HTTPException(504, "VROOM timed out")
+    except OSError:
+        raise HTTPException(503, "VROOM executable unavailable")
 
-    if any(
-        value is None
-        for row in durations
-        for value in row
-    ):
+    if process.returncode != 0:
         raise HTTPException(
-            422, "Some locations are unreachable by road"
+            502,
+            f"VROOM execution failed: {stderr.decode()[:300]}"
         )
 
-    # The depot is node 0. For an open route, create a
-    # virtual end node with zero-cost incoming arcs.
-    size = n if payload.round_trip else n + 1
-    virtual_end = None if payload.round_trip else n
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError:
+        raise HTTPException(502, "Invalid VROOM response")
 
-    manager = pywrapcp.RoutingIndexManager(
-        size,
-        1,
-        [0],
-        [0 if payload.round_trip else virtual_end]
-    )
+    if result.get("code") != 0:
+        raise HTTPException(
+            422,
+            result.get("error", "Route optimization failed")
+        )
 
-    routing = pywrapcp.RoutingModel(manager)
+    if result.get("unassigned"):
+        raise HTTPException(
+            422,
+            "Some destinations are unreachable or unassigned"
+        )
 
-    def time_callback(from_index, to_index):
-        a = manager.IndexToNode(from_index)
-        b = manager.IndexToNode(to_index)
+    routes = result.get("routes", [])
+    if len(routes) != 1:
+        raise HTTPException(502, "Expected exactly one vehicle route")
 
-        if a == virtual_end or b == virtual_end:
-            return 0
+    route = routes[0]
 
-        return int(round(durations[a][b] * 1000))
+    order = [0]
+    for step in route.get("steps", []):
+        if step.get("type") == "job":
+            order.append(step["id"])
 
-    transit_index = routing.RegisterTransitCallback(
-        time_callback
-    )
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_index)
+    if (
+        len(order) != len(points)
+        or len(set(order)) != len(points)
+        or order[0] != 0
+    ):
+        raise HTTPException(502, "Invalid optimized stop order")
 
-    search = pywrapcp.DefaultRoutingSearchParameters()
-    search.first_solution_strategy = (
-        routing_enums_pb2.FirstSolutionStrategy
-        .PATH_CHEAPEST_ARC
-    )
-    search.local_search_metaheuristic = (
-        routing_enums_pb2.LocalSearchMetaheuristic
-        .GUIDED_LOCAL_SEARCH
-    )
-    search.time_limit.seconds = 15
+    distance = route.get("distance")
+    duration = route.get("duration")
 
-    solution = routing.SolveWithParameters(search)
-
-    if solution is None:
-        raise HTTPException(422, "No feasible route found")
-
-    order = []
-    index = routing.Start(0)
-
-    while not routing.IsEnd(index):
-        node = manager.IndexToNode(index)
-        if node != virtual_end:
-            order.append(node)
-        index = solution.Value(routing.NextVar(index))
-
-    if len(order) != n or len(set(order)) != n:
-        raise HTTPException(500, "Invalid optimization result")
-
-    journey = order[:]
-    if payload.round_trip:
-        journey.append(0)
-
-    total_distance = 0.0
-    total_duration = 0.0
-
-    for a, b in zip(journey, journey[1:]):
-        total_distance += distances[a][b]
-        total_duration += durations[a][b]
+    if distance is None or duration is None:
+        raise HTTPException(
+            502,
+            "VROOM did not return distance or duration"
+        )
 
     return {
         "order": order,
-        "distance_m": total_distance,
-        "duration_s": total_duration
+        "distance_m": float(distance),
+        "duration_s": float(duration)
     }

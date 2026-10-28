@@ -115,11 +115,8 @@ export const fetchMarketQuotes = async (symbols) => {
   })).data;
 };
 
-
 export const fetchBenchmarkHistory = async () =>
   (await API.get('/market/benchmark/history')).data;
-
-
 
 export const fetchRoutePlans = async () =>
   (await API.get('/routes')).data;
@@ -138,3 +135,17 @@ export const updateRouteSegment = async (
     `/routes/${routeId}/segments/${segmentId}`,
     { completed }
   )).data;
+
+export const parseRouteScreenshots = async (files) => {
+  const form = new FormData();
+  Array.from(files).forEach(file => form.append('files', file));
+
+  return (await API.post('/routes/parse', form, {
+    timeout: 300_000
+  })).data;
+};
+
+export const verifyRouteAddress = async (address) =>
+  (await API.post('/routes/verify-address', { address }, {
+    timeout: 30_000
+  })).data;

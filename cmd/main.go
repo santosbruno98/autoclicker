@@ -141,6 +141,9 @@ func main() {
 		api.GET("/routes", handlers.ListRoutePlans)
 		api.PATCH("/routes/:id/segments/:segmentId", handlers.SetRouteSegmentCompleted)
 
+		api.POST("/routes/parse", handlers.ParseRouteScreenshots)
+		api.POST("/routes/verify-address", handlers.VerifyRouteAddress)
+
 	}
 
 	r.GET("/metrics", handlers.GetPrometheusMetrics)

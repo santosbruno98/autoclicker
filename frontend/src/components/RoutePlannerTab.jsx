@@ -1,86 +1,80 @@
 
 import React, { useEffect, useState } from 'react';
 import {
-  Route, MapPin, Navigation, CheckCircle2,
-  RefreshCw, Plus, ExternalLink
+  Upload, Route, Navigation, CheckCircle2,
+  AlertTriangle, RefreshCw, ExternalLink
 } from 'lucide-react';
 
 import {
   fetchRoutePlans,
   createRoutePlan,
-  updateRouteSegment
+  updateRouteSegment,
+  parseRouteScreenshots,
+  verifyRouteAddress
 } from '../services/api';
 
-function parseLocations(text) {
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+const keyOf = s =>
+  `${Number(s.latitude).toFixed(6)},${Number(s.longitude).toFixed(6)}`;
 
-  return lines.map((line, index) => {
-    const parts = line.split(';').map(s => s.trim());
+function groupDestinations(services) {
+  const groups = new Map();
 
-    if (parts.length !== 3) {
-      throw new Error(`Row ${index + 1}: expected Address;Latitude;Longitude`);
+  for (const service of services) {
+    const key = keyOf(service);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        address: service.address,
+        latitude: service.latitude,
+        longitude: service.longitude,
+        services: []
+      });
     }
+    groups.get(key).services.push({
+      service_type: service.service_type
+    });
+  }
 
-    const latitude = Number(parts[1]);
-    const longitude = Number(parts[2]);
-
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-      throw new Error(`Row ${index + 1}: invalid coordinates`);
-    }
-
-    return {
-      address: parts[0],
-      latitude,
-      longitude
-    };
-  });
+  return [...groups.values()];
 }
 
 export default function RoutePlannerTab() {
+  const [files, setFiles] = useState([]);
+  const [complete, setComplete] = useState([]);
+  const [uncomplete, setUncomplete] = useState([]);
   const [plans, setPlans] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [name, setName] = useState('');
-  const [locations, setLocations] = useState('');
+  const [depot, setDepot] = useState('');
+  const [depotPoint, setDepotPoint] = useState(null);
   const [roundTrip, setRoundTrip] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [tab, setTab] = useState('complete');
 
   const load = async () => {
-    try {
-      const data = await fetchRoutePlans();
-      setPlans(data || []);
-      setSelectedId(current =>
-        current ?? (data?.[0]?.id || null)
-      );
-    } catch (err) {
-      setError(err.response?.data?.error || err.message);
-    }
+    const data = await fetchRoutePlans();
+    setPlans(data || []);
+    setSelectedId(current =>
+      data?.some(p => p.id === current)
+        ? current
+        : data?.[0]?.id ?? null
+    );
   };
 
   useEffect(() => {
-    load();
+    load().catch(err => setError(err.message));
   }, []);
 
-  const create = async (event) => {
-    event.preventDefault();
-    setError('');
+  const upload = async () => {
+    if (!files.length) return;
     setBusy(true);
+    setError('');
 
     try {
-      const stops = parseLocations(locations);
-
-      if (stops.length < 2) {
-        throw new Error('At least two locations are required.');
-      }
-
-      const plan = await createRoutePlan({
-        name: name || 'Guarda Route',
-        stops,
-        round_trip: roundTrip
-      });
-
-      await load();
-      setSelectedId(plan.id);
+      const data = await parseRouteScreenshots(files);
+      setComplete(data.complete || []);
+      setUncomplete(data.uncomplete || []);
+      setTab('complete');
     } catch (err) {
       setError(err.response?.data?.error || err.message);
     } finally {
@@ -88,10 +82,100 @@ export default function RoutePlannerTab() {
     }
   };
 
-  const toggle = async (planId, segment) => {
+  const updateIncompleteAddress = (index, value) => {
+    setUncomplete(current => current.map((s, i) =>
+      i === index ? { ...s, address: value } : s
+    ));
+  };
+
+  const retryAddress = async index => {
+    setBusy(true);
+    setError('');
+
+    try {
+      const item = uncomplete[index];
+      const result = await verifyRouteAddress(item.address);
+
+      if (result.status !== 'complete') {
+        throw new Error(result.reason || 'Address still incomplete');
+      }
+
+      setComplete(current => [...current, {
+        ...result,
+        service_type: item.service_type
+      }]);
+
+      setUncomplete(current => current.filter((_, i) => i !== index));
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifyDepot = async () => {
+    setBusy(true);
+    setError('');
+    setDepotPoint(null);
+
+    try {
+      const result = await verifyRouteAddress(depot);
+      if (result.status !== 'complete') {
+        throw new Error(result.reason || 'Starting address not verified');
+      }
+      setDepotPoint(result);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const destinations = groupDestinations(complete);
+
+  const optimize = async () => {
+    if (!depotPoint) {
+      setError('Verify your starting location first.');
+      return;
+    }
+    if (!destinations.length) {
+      setError('No complete destinations available.');
+      return;
+    }
+
+    setBusy(true);
+    setError('');
+
+    try {
+      const route = await createRoutePlan({
+        name: name.trim() || 'Guarda Deliveries',
+        round_trip: roundTrip,
+        stops: [
+          {
+            address: depotPoint.address,
+            latitude: depotPoint.latitude,
+            longitude: depotPoint.longitude,
+            services: []
+          },
+          ...destinations
+        ]
+      });
+
+      await load();
+      setSelectedId(route.id);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = async segment => {
+    if (!selectedId) return;
+
     try {
       await updateRouteSegment(
-        planId,
+        selectedId,
         segment.id,
         !segment.completed
       );
@@ -103,89 +187,221 @@ export default function RoutePlannerTab() {
 
   const selected = plans.find(p => p.id === selectedId);
   const segments = selected?.segments || [];
-  const completed = segments.filter(s => s.completed).length;
+  const done = segments.filter(s => s.completed).length;
   const next = segments.find(s => !s.completed);
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h2 className="text-2xl font-bold text-white">
-          Route Planner
-        </h2>
+    <div className="space-y-5">
+      <header>
+        <h2 className="text-2xl font-bold">Route Planner</h2>
         <p className="mt-1 text-sm text-slate-400">
-          Optimize stops and navigate through connected Google Maps routes.
+          Screenshot → addresses → optimized Google Maps routes
         </p>
-      </div>
+      </header>
 
-      <section className="terminal-card p-5">
-        <h3 className="mb-4 flex items-center gap-2 font-semibold">
-          <Plus size={18} /> New route
+      <section className="terminal-card space-y-4 p-4">
+        <h3 className="flex items-center gap-2 font-semibold">
+          <Upload size={18} /> Import delivery screenshots
         </h3>
 
-        <form onSubmit={create} className="space-y-4">
-          <input
-            className="terminal-input"
-            placeholder="Route name"
-            value={name}
-            onChange={e => setName(e.target.value)}
-          />
+        <input
+          type="file"
+          accept="image/png,image/jpeg,image/webp"
+          multiple
+          className="terminal-input"
+          onChange={e => setFiles([...e.target.files])}
+        />
 
-          <textarea
-            className="terminal-input min-h-40 w-full font-mono text-sm"
-            placeholder={
-              'Depot;40.538;-7.262\n' +
-              'Stop A;40.547;-7.291\n' +
-              'Stop B;40.522;-7.244'
-            }
-            value={locations}
-            onChange={e => setLocations(e.target.value)}
-            required
-          />
+        <p className="text-xs text-slate-400">
+          Upload screenshots from your delivery app.
+          Incomplete addresses will be excluded automatically.
+        </p>
 
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={roundTrip}
-              onChange={e => setRoundTrip(e.target.checked)}
-            />
-            Return to starting location
-          </label>
+        <button
+          className="terminal-button"
+          disabled={busy || !files.length}
+          onClick={upload}
+        >
+          {busy ? 'Processing...' : `Extract addresses (${files.length})`}
+        </button>
+      </section>
 
-          <button className="terminal-button" disabled={busy}>
-            <Route size={16} />
-            {busy ? 'Optimizing...' : 'Optimize route'}
+      <section className="terminal-card p-4">
+        <div className="mb-4 flex flex-wrap gap-2">
+          <button
+            className={tab === 'complete'
+              ? 'terminal-button'
+              : 'terminal-button-secondary'}
+            onClick={() => setTab('complete')}
+          >
+            <CheckCircle2 size={16} />
+            Complete ({complete.length})
           </button>
-        </form>
+
+          <button
+            className={tab === 'uncomplete'
+              ? 'terminal-button'
+              : 'terminal-button-secondary'}
+            onClick={() => setTab('uncomplete')}
+          >
+            <AlertTriangle size={16} />
+            Uncomplete ({uncomplete.length})
+          </button>
+        </div>
+
+        {tab === 'complete' ? (
+          <div className="space-y-3">
+            <p className="text-sm text-slate-400">
+              {complete.length} services across{' '}
+              {destinations.length} unique destinations.
+              Review the addresses before optimization.
+            </p>
+
+            {destinations.map((stop, index) => {
+              const deliveries = stop.services.filter(
+                s => s.service_type === 'delivery'
+              ).length;
+              const pickups = stop.services.filter(
+                s => s.service_type === 'pickup'
+              ).length;
+              const unknown = stop.services.filter(
+                s => s.service_type === 'unknown'
+              ).length;
+
+              return (
+                <div
+                  key={keyOf(stop)}
+                  className="rounded-xl border border-white/10 p-3"
+                >
+                  <p className="text-sm font-semibold">
+                    {index + 1}. {stop.address}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {deliveries} deliveries · {pickups} pickups
+                    {unknown > 0 && ` · ${unknown} unknown`}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {uncomplete.length === 0 && (
+              <p className="text-sm text-slate-400">
+                No incomplete addresses.
+              </p>
+            )}
+
+            {uncomplete.map((item, index) => (
+              <div
+                key={`${index}-${item.service_type}`}
+                className="space-y-2 rounded-xl border border-amber-500/20 p-3"
+              >
+                <p className="text-xs text-amber-300">
+                  {item.reason}
+                </p>
+
+                <textarea
+                  className="terminal-input min-h-20"
+                  value={item.address}
+                  onChange={e =>
+                    updateIncompleteAddress(index, e.target.value)
+                  }
+                />
+
+                <p className="text-xs text-slate-400">
+                  Service: {item.service_type}
+                </p>
+
+                <button
+                  className="terminal-button-secondary"
+                  disabled={busy}
+                  onClick={() => retryAddress(index)}
+                >
+                  <RefreshCw size={15} />
+                  Verify corrected address
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="terminal-card space-y-4 p-4">
+        <h3 className="flex items-center gap-2 font-semibold">
+          <Route size={18} /> Generate route
+        </h3>
+
+        <input
+          className="terminal-input"
+          placeholder="Route name"
+          value={name}
+          onChange={e => setName(e.target.value)}
+        />
+
+        <div className="flex flex-col gap-2 sm:flex-row">
+          <input
+            className="terminal-input flex-1"
+            placeholder="Starting address with postal code and locality"
+            value={depot}
+            onChange={e => {
+              setDepot(e.target.value);
+              setDepotPoint(null);
+            }}
+          />
+          <button
+            className="terminal-button-secondary"
+            onClick={verifyDepot}
+            disabled={busy || !depot.trim()}
+          >
+            Verify start
+          </button>
+        </div>
+
+        {depotPoint && (
+          <p className="text-xs text-emerald-300">
+            Starting location verified: {depotPoint.address}
+          </p>
+        )}
+
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={roundTrip}
+            onChange={e => setRoundTrip(e.target.checked)}
+          />
+          Return to starting location
+        </label>
+
+        <button
+          className="terminal-button w-full sm:w-auto"
+          disabled={busy || !depotPoint || !destinations.length}
+          onClick={optimize}
+        >
+          <Navigation size={17} />
+          {busy ? 'Processing...' : `Optimize ${destinations.length} stops`}
+        </button>
       </section>
 
       {error && (
-        <div role="alert"
-          className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-300">
+        <div
+          role="alert"
+          className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
+        >
           {error}
         </div>
       )}
 
-      <section className="terminal-card p-5">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h3 className="font-semibold">Saved routes</h3>
-          <button
-            className="terminal-button-secondary"
-            onClick={load}
-          >
-            <RefreshCw size={15} /> Refresh
-          </button>
-        </div>
-
+      <section className="terminal-card space-y-4 p-4">
+        <h3 className="font-semibold">Saved routes</h3>
         <div className="flex flex-wrap gap-2">
           {plans.map(plan => (
             <button
               key={plan.id}
               onClick={() => setSelectedId(plan.id)}
-              className={
-                selectedId === plan.id
-                  ? 'terminal-button'
-                  : 'terminal-button-secondary'
-              }
+              className={selectedId === plan.id
+                ? 'terminal-button'
+                : 'terminal-button-secondary'}
             >
               {plan.name} #{plan.id}
             </button>
@@ -194,123 +410,96 @@ export default function RoutePlannerTab() {
       </section>
 
       {selected && (
-        <section className="terminal-card overflow-hidden">
-          <div className="border-b border-white/10 p-5">
-            <h3 className="text-lg font-semibold">
-              {selected.name}
-            </h3>
+        <section className="terminal-card space-y-4 p-4">
+          <h3 className="text-lg font-semibold">{selected.name}</h3>
 
-            <div className="mt-3 grid grid-cols-3 gap-3">
-              <div>
-                <p className="text-xs text-slate-400">Distance</p>
-                <p className="font-semibold">
-                  {(selected.distance_m / 1000).toFixed(1)} km
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-slate-400">Drive time</p>
-                <p className="font-semibold">
-                  {Math.round(selected.duration_s / 60)} min
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-slate-400">Completed</p>
-                <p className="font-semibold">
-                  {completed}/{segments.length}
-                </p>
-              </div>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-xl bg-white/5 p-3">
+              <p className="text-lg font-bold">
+                {(selected.distance_m / 1000).toFixed(1)}
+              </p>
+              <p className="text-xs text-slate-400">km</p>
             </div>
-
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-700">
-              <div
-                className="h-full bg-emerald-500"
-                style={{
-                  width: `${segments.length
-                    ? completed / segments.length * 100
-                    : 0}%`
-                }}
-              />
+            <div className="rounded-xl bg-white/5 p-3">
+              <p className="text-lg font-bold">
+                {Math.round(selected.duration_s / 60)}
+              </p>
+              <p className="text-xs text-slate-400">minutes</p>
             </div>
-
-            {next && (
-              <a
-                className="terminal-button mt-4 inline-flex"
-                href={next.google_maps_url}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <Navigation size={17} />
-                Navigate Route {next.sequence}
-              </a>
-            )}
+            <div className="rounded-xl bg-white/5 p-3">
+              <p className="text-lg font-bold">
+                {done}/{segments.length}
+              </p>
+              <p className="text-xs text-slate-400">routes done</p>
+            </div>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="terminal-table w-full">
-              <thead>
-                <tr>
-                  <th>Done</th>
-                  <th>Route</th>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>Navigation</th>
-                </tr>
-              </thead>
-              <tbody>
-                {segments.map(segment => {
-                  const from = selected.stops.find(
-                    s => s.sequence === segment.start_stop
-                  );
-                  const to = selected.stops.find(
-                    s => s.sequence === segment.end_stop
-                  );
+          {next && (
+            <a
+              href={next.google_maps_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="terminal-button w-full"
+            >
+              <Navigation size={17} />
+              Open next route in Google Maps
+            </a>
+          )}
 
-                  return (
-                    <tr key={segment.id}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={segment.completed}
-                          onChange={() =>
-                            toggle(selected.id, segment)
-                          }
-                          aria-label={
-                            `Complete Route ${segment.sequence}`
-                          }
-                        />
-                      </td>
-                      <td>
-                        <span className="flex items-center gap-2">
-                          {segment.completed
-                            ? <CheckCircle2
-                                size={16}
-                                className="text-emerald-400"
-                              />
-                            : <MapPin
-                                size={16}
-                                className="text-cyan-400"
-                              />
-                          }
-                          Route {segment.sequence}
-                        </span>
-                      </td>
-                      <td>{from?.address || '—'}</td>
-                      <td>{to?.address || '—'}</td>
-                      <td>
-                        <a
-                          href={segment.google_maps_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-2 text-cyan-400"
-                        >
-                          Open Maps <ExternalLink size={14} />
-                        </a>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="space-y-3">
+            {segments.map(segment => {
+              const from = selected.stops.find(
+                s => s.sequence === segment.start_stop
+              );
+              const to = selected.stops.find(
+                s => s.sequence === segment.end_stop
+              );
+
+              const visited = selected.stops.filter(
+                s => s.sequence > segment.start_stop &&
+                  s.sequence <= segment.end_stop
+              );
+
+              return (
+                <div
+                  key={segment.id}
+                  className="rounded-xl border border-white/10 p-3"
+                >
+                  <div className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      className="mt-1 h-5 w-5"
+                      checked={segment.completed}
+                      onChange={() => toggle(segment)}
+                    />
+
+                    <div className="min-w-0 flex-1">
+                      <p className="font-semibold">
+                        Route {segment.sequence}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        {from?.address} → {to?.address}
+                      </p>
+
+                      <p className="mt-2 text-xs text-slate-500">
+                        {visited.reduce(
+                          (n, s) => n + (s.services?.length || 0), 0
+                        )} services · {visited.length} destination stops
+                      </p>
+
+                      <a
+                        href={segment.google_maps_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-cyan-400"
+                      >
+                        Open Google Maps <ExternalLink size={15} />
+                      </a>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </section>
       )}

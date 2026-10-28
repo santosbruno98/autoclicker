@@ -1,9 +1,6 @@
 
 import React, { useEffect, useState } from 'react';
-import {
-  LayoutDashboard, StickyNote, Activity, MousePointer2,
-  Menu, X, ChevronRight, Github
-} from 'lucide-react';
+
 
 import PortfolioTab from './components/PortfolioTab';
 import NotesTab from './components/NotesTab';
@@ -11,7 +8,7 @@ import KafkaLogsTab from './components/KafkaLogsTab';
 import ControllerTab from './components/ControllerTab';
 import {
   LayoutDashboard, StickyNote, Activity, MousePointer2,
-  Menu, X, ChevronRight, Github, Route
+  Menu, X, ChevronRight, Github
 } from 'lucide-react';
 import RoutePlannerTab from './components/RoutePlannerTab';
 
