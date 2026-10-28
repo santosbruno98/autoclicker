@@ -9,12 +9,18 @@ import PortfolioTab from './components/PortfolioTab';
 import NotesTab from './components/NotesTab';
 import KafkaLogsTab from './components/KafkaLogsTab';
 import ControllerTab from './components/ControllerTab';
+import {
+  LayoutDashboard, StickyNote, Activity, MousePointer2,
+  Menu, X, ChevronRight, Github, Route
+} from 'lucide-react';
+import RoutePlannerTab from './components/RoutePlannerTab';
 
 const navigation = [
   { id: 'portfolio', label: 'Investment Workspace', icon: LayoutDashboard },
   { id: 'notes', label: 'Notes', icon: StickyNote },
   { id: 'kafka', label: 'Kafka Logs', icon: Activity },
   { id: 'controller', label: 'Desktop Controller', icon: MousePointer2 },
+  { id: 'routes', label: 'Route Planner', icon: Route },
 ];
 
 export default function App() {
@@ -134,6 +140,7 @@ export default function App() {
           {activeTab === 'notes' && <NotesTab />}
           {activeTab === 'kafka' && <KafkaLogsTab />}
           {activeTab === 'controller' && <ControllerTab />}
+          {activeTab === 'routes' && <RoutePlannerTab />}
         </main>
       </div>
     </div>

@@ -1,0 +1,62 @@
+
+name: Daily Route Cleanup
+
+on:
+  schedule:
+    # Winter: 00:10 UTC = 00:10 Portugal
+    # Summer: 23:10 UTC = 00:10 Portugal next day
+    - cron: '10 0,23 * * *'
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Check Portugal time and clean routes
+        env:
+          ROUTES_DATABASE_URL: ${{ secrets.NEON_ROUTES_DATABASE_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Allow manual runs at any time.
+          if [[ "$EVENT_NAME" != "workflow_dispatch" ]]; then
+            LOCAL_TIME=$(TZ=Europe/Lisbon date +%H:%M)
+
+            # GitHub schedules are UTC and may start late.
+            # Accept the first hour after local midnight.
+            LOCAL_HOUR=$(TZ=Europe/Lisbon date +%H)
+
+            if [[ "$LOCAL_HOUR" != "00" ]]; then
+              echo "Not midnight in Portugal ($LOCAL_TIME). Skipping."
+              exit 0
+            fi
+          fi
+
+          if [[ -z "${ROUTES_DATABASE_URL:-}" ]]; then
+            echo "Missing NEON_ROUTES_DATABASE_URL secret"
+            exit 1
+          fi
+
+          echo "Cleaning temporary route data..."
+
+          psql "$ROUTES_DATABASE_URL" \
+            -X \
+            -v ON_ERROR_STOP=1 \
+            -f scripts/cleanup_routes.sql
+
+          echo "Route cleanup completed."

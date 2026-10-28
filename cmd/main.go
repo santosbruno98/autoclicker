@@ -79,6 +79,9 @@ func main() {
 	if err := database.InitMarketDB(); err != nil {
 		log.Fatalf("Failed to initialize market database: %v", err)
 	}
+	if err := database.InitRouteDB(); err != nil {
+		log.Fatalf("Failed to init routes database %v", err)
+	}
 
 	r := gin.Default()
 	r.Use(CORSMiddleware())
@@ -132,6 +135,12 @@ func main() {
 
 		api.GET("/market/benchmark/history", handlers.GetBenchmarkHistory)
 
+		// Routes
+
+		api.POST("/routes", handlers.CreateRoutePlan)
+		api.GET("/routes", handlers.ListRoutePlans)
+		api.PATCH("/routes/:id/segments/:segmentId", handlers.SetRouteSegmentCompleted)
+
 	}
 
 	r.GET("/metrics", handlers.GetPrometheusMetrics)
@@ -182,6 +191,8 @@ func main() {
 	closeDB("portfolioDB", database.PortfolioDB)
 	closeDB("notesDB", database.NotesDB)
 	closeDB("autoclicker", database.DB)
+	closeDB("marketDB", database.MarketDB)
+	closeDB("routesDB", database.RouteDB)
 	database.CloseMarketDB()
 
 	//TODO: Put the API logs into a topic and the application logs into another topic, using wildcard binding strings.

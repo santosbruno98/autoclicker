@@ -118,3 +118,23 @@ export const fetchMarketQuotes = async (symbols) => {
 
 export const fetchBenchmarkHistory = async () =>
   (await API.get('/market/benchmark/history')).data;
+
+
+
+export const fetchRoutePlans = async () =>
+  (await API.get('/routes')).data;
+
+export const createRoutePlan = async (payload) =>
+  (await API.post('/routes', payload, {
+    timeout: 200_000,
+  })).data;
+
+export const updateRouteSegment = async (
+  routeId,
+  segmentId,
+  completed
+) =>
+  (await API.patch(
+    `/routes/${routeId}/segments/${segmentId}`,
+    { completed }
+  )).data;

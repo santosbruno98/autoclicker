@@ -30,6 +30,12 @@ func main() {
 	database.InitCoreDB()
 	database.InitNotesDB()
 	database.InitPortfolioDB()
+	if err := database.InitMarketDB(); err != nil {
+		log.Fatalf("Failed to initialize market database: %v", err)
+	}
+	if err := database.InitRouteDB(); err != nil {
+		log.Fatalf("Failed to init routes database %v", err)
+	}
 
 	// Authentication
 	authService, err := auth.NewService(context.Background())
@@ -100,7 +106,13 @@ func main() {
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
 
-		
+		api.POST("/routes", handlers.CreateRoutePlan)
+		api.GET("/routes", handlers.ListRoutePlans)
+		api.PATCH(
+			"/routes/:id/segments/:segmentId",
+			handlers.SetRouteSegmentCompleted,
+		)
+
 		api.GET("/market/benchmark/history", handlers.GetBenchmarkHistory)
 
 	}
