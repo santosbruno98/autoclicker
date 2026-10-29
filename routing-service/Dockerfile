@@ -25,9 +25,15 @@ RUN git clone \
 
 WORKDIR /src/vroom
 
-RUN make -j2
+RUN cmake -S . -B build \
+    -DCMAKE_BUILD_TYPE=Release
 
-RUN test -x ./bin/vroom
+RUN cmake --build build --parallel 2
+
+RUN find build -type f -name vroom -executable \
+    -exec cp {} /usr/local/bin/vroom \;
+
+RUN test -x /usr/local/bin/vroom
 
 
 FROM python:3.12-slim-bookworm
@@ -53,11 +59,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=vroom-builder \
-    /src/vroom/bin/vroom \
+    /usr/local/bin/vroom \
     /usr/local/bin/vroom
 
-RUN ldd /usr/local/bin/vroom && \
-    /usr/local/bin/vroom -h >/dev/null 2>&1 || true
+RUN ldd /usr/local/bin/vroom
 
 WORKDIR /app
 
@@ -77,7 +82,6 @@ RUN chmod +x prepare-map.sh start.sh && \
     test -n "$PROFILE" && \
     cp "$PROFILE" /opt/car.lua
 
-# Preprocess map once at image build time.
 RUN ./prepare-map.sh
 
 EXPOSE 8080
