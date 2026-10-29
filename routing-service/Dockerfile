@@ -25,15 +25,13 @@ RUN git clone \
 
 WORKDIR /src/vroom
 
-RUN cmake -S . -B build \
-    -DCMAKE_BUILD_TYPE=Release
+RUN git submodule update --init --recursive
 
-RUN cmake --build build --parallel 2
+WORKDIR /src/vroom/src
 
-RUN find build -type f -name vroom -executable \
-    -exec cp {} /usr/local/bin/vroom \;
+RUN make -j2
 
-RUN test -x /usr/local/bin/vroom
+RUN test -x /src/vroom/bin/vroom
 
 
 FROM python:3.12-slim-bookworm
@@ -59,7 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=vroom-builder \
-    /usr/local/bin/vroom \
+    /src/vroom/bin/vroom \
     /usr/local/bin/vroom
 
 RUN ldd /usr/local/bin/vroom
