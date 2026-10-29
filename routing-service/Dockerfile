@@ -1,34 +1,85 @@
 
-FROM python:3.12-slim
+FROM debian:bookworm-slim AS vroom-builder
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ARG VROOM_VERSION=v1.15.0
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    build-essential \
+    cmake \
+    pkg-config \
+    libboost-all-dev \
+    libssl-dev \
+    libcurl4-openssl-dev \
+    libglpk-dev \
+    libasio-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+RUN git clone \
+    --depth 1 \
+    --branch "${VROOM_VERSION}" \
+    https://github.com/VROOM-Project/vroom.git
+
+WORKDIR /src/vroom
+
+RUN make -j2
+
+RUN test -x ./bin/vroom
+
+
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    VROOM_BIN=/usr/local/bin/vroom \
+    OSRM_HOST=127.0.0.1 \
+    OSRM_PORT=5000
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    ca-certificates \
     curl \
     osmium-tool \
     osrm-backend \
+    libboost-system1.74.0 \
+    libboost-filesystem1.74.0 \
+    libboost-program-options1.74.0 \
+    libssl3 \
+    libcurl4 \
+    libglpk40 \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=vroom-builder \
+    /src/vroom/bin/vroom \
+    /usr/local/bin/vroom
+
+RUN ldd /usr/local/bin/vroom && \
+    /usr/local/bin/vroom -h >/dev/null 2>&1 || true
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt ./
 
-COPY app.py .
-COPY prepare-map.sh .
+RUN pip install \
+    --no-cache-dir \
+    -r requirements.txt
 
-# Find the installed OSRM car profile.
-RUN find /usr -name car.lua -print
+COPY app.py ./
+COPY prepare-map.sh ./
+COPY start.sh ./
 
-# Prepare map data at build time, not per request.
-RUN chmod +x prepare-map.sh && \
-    mkdir -p /opt && \
-    cp "$(find /usr -name car.lua -print -quit)" /opt/car.lua && \
-    ./prepare-map.sh
+RUN chmod +x prepare-map.sh start.sh && \
+    mkdir -p /opt /data && \
+    PROFILE="$(find /usr -name car.lua -print -quit)" && \
+    test -n "$PROFILE" && \
+    cp "$PROFILE" /opt/car.lua
 
-ENV OSRM_URL=http://127.0.0.1:5000
+# Preprocess map once at image build time.
+RUN ./prepare-map.sh
 
-CMD ["sh", "-c", \
-  "osrm-routed --algorithm ch --port 5000 /data/guarda.osrm & \
-   exec uvicorn app:app --host 0.0.0.0 --port ${PORT:-8080}"]
+EXPOSE 8080
+
+CMD ["./start.sh"]

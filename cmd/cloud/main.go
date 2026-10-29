@@ -106,13 +106,12 @@ func main() {
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
 
+		// Routing endpoints
 		api.POST("/routes", handlers.CreateRoutePlan)
 		api.GET("/routes", handlers.ListRoutePlans)
-		api.PATCH(
-			"/routes/:id/segments/:segmentId",
-			handlers.SetRouteSegmentCompleted,
-		)
-
+		api.PATCH("/routes/:id/segments/:segmentId", handlers.SetRouteSegmentCompleted)
+		api.POST("/routes/parse", handlers.ParseRouteScreenshots)
+		api.POST("/routes/verify-address", handlers.VerifyRouteAddress)
 		api.GET("/market/benchmark/history", handlers.GetBenchmarkHistory)
 
 	}

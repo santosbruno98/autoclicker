@@ -1,15 +1,21 @@
 
 import React, { useEffect, useState } from 'react';
-
+import {
+  LayoutDashboard,
+  StickyNote,
+  Activity,
+  MousePointer2,
+  Menu,
+  X,
+  ChevronRight,
+  Github,
+  Route
+} from 'lucide-react';
 
 import PortfolioTab from './components/PortfolioTab';
 import NotesTab from './components/NotesTab';
 import KafkaLogsTab from './components/KafkaLogsTab';
 import ControllerTab from './components/ControllerTab';
-import {
-  LayoutDashboard, StickyNote, Activity, MousePointer2,
-  Menu, X, ChevronRight, Github
-} from 'lucide-react';
 import RoutePlannerTab from './components/RoutePlannerTab';
 
 const navigation = [
@@ -17,7 +23,7 @@ const navigation = [
   { id: 'notes', label: 'Notes', icon: StickyNote },
   { id: 'kafka', label: 'Kafka Logs', icon: Activity },
   { id: 'controller', label: 'Desktop Controller', icon: MousePointer2 },
-  { id: 'routes', label: 'Route Planner', icon: Route },
+  { id: 'routes', label: 'Route Planner', icon: Route }
 ];
 
 export default function App() {
@@ -28,12 +34,12 @@ export default function App() {
     document.title = 'MyPlatform | Investment Workspace';
   }, []);
 
-  const navigate = (id) => {
+  const navigate = id => {
     setActiveTab(id);
     setMobileMenuOpen(false);
   };
 
-  const active = navigation.find((item) => item.id === activeTab);
+  const active = navigation.find(item => item.id === activeTab);
 
   return (
     <div className="min-h-screen bg-[#090f1c] text-slate-100 lg:flex">
@@ -46,9 +52,12 @@ export default function App() {
         />
       )}
 
-      <aside className={`fixed inset-y-0 left-0 z-40 w-64 border-r border-white/10
-        bg-[#101a2c] transition-transform lg:sticky lg:top-0 lg:h-screen
-        lg:translate-x-0 ${mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'}`}
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 w-64 border-r border-white/10
+          bg-[#101a2c] transition-transform lg:sticky lg:top-0 lg:h-screen
+          lg:translate-x-0 ${
+            mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+          }`}
       >
         <div className="flex h-20 items-center justify-between border-b border-white/10 px-5">
           <div>
@@ -59,6 +68,7 @@ export default function App() {
               Investment workspace
             </div>
           </div>
+
           <button
             className="text-slate-400 lg:hidden"
             onClick={() => setMobileMenuOpen(false)}
@@ -72,6 +82,7 @@ export default function App() {
           <div className="px-3 py-3 text-[11px] font-semibold uppercase tracking-widest text-slate-500">
             Navigation
           </div>
+
           {navigation.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
@@ -91,7 +102,10 @@ export default function App() {
         </nav>
 
         <div className="absolute bottom-5 left-4 right-4 rounded-xl border border-white/10 bg-white/5 p-3">
-          <div className="text-xs font-medium text-slate-300">Development</div>
+          <div className="text-xs font-medium text-slate-300">
+            Development
+          </div>
+
           <a
             href="https://github.com/santosbruno98/autoclicker"
             target="_blank"
