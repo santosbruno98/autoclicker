@@ -1,0 +1,10 @@
+.git/
+.env
+**/venv/
+**/.venv/
+**/__pycache__/
+**/.gradle/
+**/node_modules/
+*.db
+*.exe
+backups/
