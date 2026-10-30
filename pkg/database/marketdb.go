@@ -6,53 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 var MarketDB *gorm.DB
 
 func InitMarketDB() error {
-	dsn := os.Getenv("MARKET_DATABASE_URL")
-	if dsn == "" {
-		return errors.New("MARKET_DATABASE_URL is not configured")
-	}
+	const dbName = "market_db"
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Warn),
-	})
+	// Connect to the Neon PostgreSQL database using
+	// the shared DATABASE_URL configuration.
+	db, err := ConnectPostgresDB(dbName)
 	if err != nil {
-		return fmt.Errorf("connect to market database: %w", err)
+		return fmt.Errorf(
+			"failed to connect to market database %s: %w",
+			dbName,
+			err,
+		)
 	}
 
-	sqlDB, err := db.DB()
-	if err != nil {
-		return fmt.Errorf("get market database pool: %w", err)
-	}
-
-	// Keep the connection footprint small for Cloud Run.
-	// These limits apply per Cloud Run instance.
-	sqlDB.SetMaxOpenConns(5)
-	sqlDB.SetMaxIdleConns(2)
-	sqlDB.SetConnMaxLifetime(30 * time.Minute)
-	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
-
+	// Verify that the required market database
+	// migration has already been applied.
 	ctx, cancel := context.WithTimeout(
 		context.Background(),
-		10*time.Second,
+		15*time.Second,
 	)
 	defer cancel()
 
-	if err := sqlDB.PingContext(ctx); err != nil {
-		sqlDB.Close()
-		return fmt.Errorf("ping market database: %w", err)
-	}
-
-	// Verify that the migration has been applied.
 	var tableExists bool
 
 	err = db.WithContext(ctx).
@@ -67,19 +49,28 @@ func InitMarketDB() error {
 		Scan(&tableExists).Error
 
 	if err != nil {
-		sqlDB.Close()
-		return fmt.Errorf("verify market schema: %w", err)
+		closeMarketConnection(db)
+
+		return fmt.Errorf(
+			"failed to verify market database schema: %w",
+			err,
+		)
 	}
 
 	if !tableExists {
-		sqlDB.Close()
+		closeMarketConnection(db)
+
 		return errors.New(
-			"market_document_analyses table missing; run migration 001 first",
+			"market_document_analyses table missing in market_db; run migration 001 first",
 		)
 	}
 
 	MarketDB = db
-	log.Println("Connected to Neon market database")
+
+	log.Printf(
+		"Successfully connected to market database -> %s",
+		dbName,
+	)
 
 	return nil
 }
@@ -89,13 +80,28 @@ func CloseMarketDB() {
 		return
 	}
 
-	sqlDB, err := MarketDB.DB()
+	closeMarketConnection(MarketDB)
+	MarketDB = nil
+}
+
+func closeMarketConnection(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+
+	sqlDB, err := db.DB()
 	if err != nil {
-		log.Printf("Market database pool error: %v", err)
+		log.Printf(
+			"Failed to access market database connection pool: %v",
+			err,
+		)
 		return
 	}
 
 	if err := sqlDB.Close(); err != nil {
-		log.Printf("Market database close error: %v", err)
+		log.Printf(
+			"Failed to close market database connection: %v",
+			err,
+		)
 	}
 }
