@@ -1,7 +1,6 @@
-
 import React, { useCallback, useEffect, useState } from 'react';
 import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
-import axios from 'axios';
+import { authAPI } from './services/http';
 
 const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
@@ -10,7 +9,9 @@ function AuthenticationScreen({ onAuthenticated, error, setError, busy }) {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
       <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-8 shadow-xl text-center">
         <div className="text-3xl mb-3">🔐</div>
+
         <h1 className="text-2xl font-bold mb-2">MyPlatform</h1>
+
         <p className="text-slate-400 text-sm mb-8">
           Sign in with your authorized Google account to access the dashboard.
         </p>
@@ -51,17 +52,21 @@ export default function AuthGate({ children }) {
 
   const checkSession = useCallback(async () => {
     try {
-      const response = await axios.get('/auth/me', {
-        withCredentials: true,
-      });
+      const response = await authAPI.get('/auth/me');
+
+      if (response.data?.authenticated !== true) {
+        throw new Error('Invalid authentication response');
+      }
+
       setUser(response.data);
       return true;
     } catch (err) {
-      if (err.response?.status === 401) {
-        setUser(null);
-      } else {
+      setUser(null);
+
+      if (err.response?.status !== 401) {
         setError('Unable to verify the session. Check the API connection.');
       }
+
       return false;
     } finally {
       setChecking(false);
@@ -93,14 +98,13 @@ export default function AuthGate({ children }) {
     setError('');
 
     try {
-      const response = await axios.post(
-        '/auth/google',
-        { credential: credentialResponse.credential },
-        {
-          withCredentials: true,
-          headers: { 'X-Requested-With': 'XMLHttpRequest' },
-        }
-      );
+      const response = await authAPI.post('/auth/google', {
+        credential: credentialResponse.credential,
+      });
+
+      if (response.data?.authenticated !== true) {
+        throw new Error('Invalid authentication response');
+      }
 
       setUser(response.data);
     } catch (err) {
@@ -115,10 +119,7 @@ export default function AuthGate({ children }) {
 
   const handleLogout = async () => {
     try {
-      await axios.post('/auth/logout', {}, {
-        withCredentials: true,
-        headers: { 'X-Requested-With': 'XMLHttpRequest' },
-      });
+      await authAPI.post('/auth/logout', {});
       setUser(null);
       setError('');
     } catch (err) {
@@ -151,6 +152,7 @@ export default function AuthGate({ children }) {
         <>
           <div className="bg-slate-900 text-slate-200 border-b border-slate-700 px-6 py-2 flex justify-end items-center gap-4 text-sm">
             <span className="text-slate-400">{user.email}</span>
+
             <button
               onClick={handleLogout}
               className="rounded bg-slate-700 hover:bg-slate-600 px-3 py-1"
@@ -158,6 +160,7 @@ export default function AuthGate({ children }) {
               Sign out
             </button>
           </div>
+
           {children}
         </>
       )}

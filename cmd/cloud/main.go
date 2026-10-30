@@ -14,15 +14,16 @@ import (
 )
 
 func main() {
-	port := os.Getenv("API_PORT")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = os.Getenv("API_PORT")
+	}
 	if port == "" {
 		port = "8080"
 	}
 
 	gin.SetMode(gin.ReleaseMode)
 
-	// Database connections are required by the existing handlers.
-	// Cloud Run must receive DATABASE_URL through its configuration.
 	if os.Getenv("DATABASE_URL") == "" {
 		log.Fatal("DATABASE_URL is required for the cloud API")
 	}
@@ -30,14 +31,15 @@ func main() {
 	database.InitCoreDB()
 	database.InitNotesDB()
 	database.InitPortfolioDB()
+
 	if err := database.InitMarketDB(); err != nil {
 		log.Fatalf("Failed to initialize market database: %v", err)
 	}
+
 	if err := database.InitRouteDB(); err != nil {
-		log.Fatalf("Failed to init routes database %v", err)
+		log.Fatalf("Failed to initialize routes database: %v", err)
 	}
 
-	// Authentication
 	authService, err := auth.NewService(context.Background())
 	if err != nil {
 		log.Fatalf("Authentication initialization failed: %v", err)
@@ -45,19 +47,15 @@ func main() {
 	defer authService.Close()
 
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery())
 
-	// Authentication
+	// CORS must run before session authentication.
+	router.Use(
+		gin.Logger(),
+		gin.Recovery(),
+		authService.CORS(),
+	)
+
 	router.POST("/auth/google", authService.GoogleLogin)
-
-	authenticated := router.Group("/")
-	authenticated.Use(authService.RequireSession())
-
-	authenticated.GET("/auth/me", authService.Me)
-	authenticated.POST("/auth/logout", authService.Logout)
-
-	// Prometheus metrics
-	authenticated.GET("/metrics", handlers.GetPrometheusMetrics)
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
@@ -65,6 +63,13 @@ func main() {
 			"status":  "ok",
 		})
 	})
+
+	authenticated := router.Group("/")
+	authenticated.Use(authService.RequireSession())
+
+	authenticated.GET("/auth/me", authService.Me)
+	authenticated.POST("/auth/logout", authService.Logout)
+	authenticated.GET("/metrics", handlers.GetPrometheusMetrics)
 
 	api := authenticated.Group("/api/v1")
 	{
@@ -93,6 +98,8 @@ func main() {
 		api.GET("/portfolio/buyingPower", handlers.GetBuyingPower)
 		api.PUT("/portfolio/buyingPower", handlers.UpdateBuyingPower)
 
+		api.GET("/portfolio/dividends", handlers.GetPortfolioDividends)
+
 		// Price thresholds
 		api.GET("/portfolio/thresholds", handlers.GetPriceThresholds)
 		api.GET("/portfolio/thresholds/:id", handlers.GetPriceThreshold)
@@ -100,29 +107,31 @@ func main() {
 		api.PUT("/portfolio/thresholds/:id", handlers.UpdatePriceThreshold)
 		api.DELETE("/portfolio/thresholds/:id", handlers.DeleteThreshold)
 
-		api.GET("/portfolio/dividends", handlers.GetPortfolioDividends)
-
 		// Market data and PDF processing
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
-
-		// Routing endpoints
-		api.POST("/routes", handlers.CreateRoutePlan)
-		api.GET("/routes", handlers.ListRoutePlans)
-		api.PATCH("/routes/:id/segments/:segmentId", handlers.SetRouteSegmentCompleted)
-		api.POST("/routes/parse", handlers.ParseRouteScreenshots)
-		api.POST("/routes/verify-address", handlers.VerifyRouteAddress)
 		api.GET("/market/benchmark/history", handlers.GetBenchmarkHistory)
 
+		// Routing
+		api.POST("/routes", handlers.CreateRoutePlan)
+		api.GET("/routes", handlers.ListRoutePlans)
+		api.PATCH(
+			"/routes/:id/segments/:segmentId",
+			handlers.SetRouteSegmentCompleted,
+		)
+		api.POST("/routes/parse", handlers.ParseRouteScreenshots)
+		api.POST("/routes/verify-address", handlers.VerifyRouteAddress)
 	}
 
-	// Grafana webhook
+	// Existing Grafana webhook
 	router.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
 
 	log.Println("=== REGISTERED API ROUTES ===")
+
 	for _, route := range router.Routes() {
 		log.Printf("%-7s %s", route.Method, route.Path)
 	}
+
 	log.Println("=============================")
 
 	if err := router.Run("0.0.0.0:" + port); err != nil {

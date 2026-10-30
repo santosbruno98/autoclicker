@@ -1,17 +1,4 @@
-
-import axios from 'axios';
-
-const API_BASE_URL = (
-  import.meta.env.VITE_API_URL || ''
-).replace(/\/+$/, '');
-
-const API = axios.create({
-  baseURL: API_BASE_URL
-    ? `${API_BASE_URL}/api/v1`
-    : '/api/v1',
-  withCredentials: true,
-});
-
+import { API } from './http';
 
 export const fetchProcesses = async (nameQuery = '') =>
   (await API.get('/processes', {
@@ -116,7 +103,9 @@ export const fetchMarketQuotes = async (symbols) => {
     ),
   ];
 
-  if (!unique.length) return { quotes: {}, errors: {} };
+  if (!unique.length) {
+    return { quotes: {}, errors: {} };
+  }
 
   return (await API.get('/market/quotes', {
     params: { symbols: unique.join(',') },
@@ -146,14 +135,17 @@ export const updateRouteSegment = async (
 
 export const parseRouteScreenshots = async (files) => {
   const form = new FormData();
-  Array.from(files).forEach(file => form.append('files', file));
+
+  Array.from(files).forEach((file) => {
+    form.append('files', file);
+  });
 
   return (await API.post('/routes/parse', form, {
-    timeout: 300_000
+    timeout: 300_000,
   })).data;
 };
 
 export const verifyRouteAddress = async (address) =>
   (await API.post('/routes/verify-address', { address }, {
-    timeout: 30_000
+    timeout: 30_000,
   })).data;

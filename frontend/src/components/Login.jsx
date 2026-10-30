@@ -1,25 +1,21 @@
-
 import { GoogleLogin } from '@react-oauth/google';
+import { authAPI } from '../services/http';
 
 export default function Login({ onLogin }) {
   const handleSuccess = async (response) => {
     try {
-      const result = await fetch('/auth/google', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          credential: response.credential,
-        }),
+      if (!response.credential) {
+        throw new Error('Google did not return an identity credential');
+      }
+
+      const { data: session } = await authAPI.post('/auth/google', {
+        credential: response.credential,
       });
 
-      if (!result.ok) {
+      if (session?.authenticated !== true) {
         throw new Error('Google authentication failed');
       }
 
-      const session = await result.json();
       onLogin(session);
     } catch (error) {
       console.error('Login error:', error);
