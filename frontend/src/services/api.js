@@ -1,9 +1,17 @@
 
 import axios from 'axios';
 
+const API_BASE_URL = (
+  import.meta.env.VITE_API_URL || ''
+).replace(/\/+$/, '');
+
 const API = axios.create({
-  baseURL: '/api/v1',
+  baseURL: API_BASE_URL
+    ? `${API_BASE_URL}/api/v1`
+    : '/api/v1',
+  withCredentials: true,
 });
+
 
 export const fetchProcesses = async (nameQuery = '') =>
   (await API.get('/processes', {
