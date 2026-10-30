@@ -1,11 +1,13 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "Starting OSRM..."
+export PORT="${PORT:-8080}"
+
+echo "Starting OSRM on internal port 5000..."
 
 osrm-routed \
   --algorithm ch \
+  --ip 127.0.0.1 \
   --port 5000 \
   --max-table-size 200 \
   --max-viaroute-size 200 \
@@ -15,43 +17,29 @@ OSRM_PID=$!
 
 cleanup() {
   echo "Stopping routing services..."
-  kill "$OSRM_PID" 2>/dev/null || true
+  kill "${API_PID:-}" "$OSRM_PID" 2>/dev/null || true
   wait "$OSRM_PID" 2>/dev/null || true
+
+  if [[ -n "${API_PID:-}" ]]; then
+    wait "$API_PID" 2>/dev/null || true
+  fi
 }
 
-trap cleanup EXIT TERM INT
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
-echo "Waiting for OSRM..."
+echo "Starting public API on 0.0.0.0:${PORT}..."
 
-READY=0
-
-for attempt in $(seq 1 60); do
-  if ! kill -0 "$OSRM_PID" 2>/dev/null; then
-    echo "OSRM exited unexpectedly"
-    exit 1
-  fi
-
-  if curl \
-    --silent \
-    --fail \
-    --max-time 2 \
-    "http://127.0.0.1:5000/nearest/v1/driving/-7.262,40.537?number=1" \
-    >/dev/null; then
-    READY=1
-    break
-  fi
-
-  sleep 1
-done
-
-if [ "$READY" -ne 1 ]; then
-  echo "OSRM failed to become ready"
-  exit 1
-fi
-
-echo "OSRM ready. Starting FastAPI..."
-
-exec uvicorn app:app \
+uvicorn app:app \
   --host 0.0.0.0 \
-  --port "${PORT:-8080}" \
-  --workers 1
+  --port "$PORT" \
+  --workers 1 &
+
+API_PID=$!
+
+# Stop the container if either process exits.
+wait -n "$OSRM_PID" "$API_PID"
+
+echo "A routing process exited; stopping container."
+exit 1
