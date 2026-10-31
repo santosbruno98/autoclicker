@@ -1,9 +1,10 @@
-
 package database
 
 import (
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"autoclicker/pkg/models"
 
@@ -13,7 +14,7 @@ import (
 var RouteDB *gorm.DB
 
 func InitRouteDB() error {
-	const dbName = "route_db"
+	dbName := strings.TrimSpace(os.Getenv("ROUTES_DB_NAME"))
 
 	db, err := ConnectPostgresDB(dbName)
 	if err != nil {

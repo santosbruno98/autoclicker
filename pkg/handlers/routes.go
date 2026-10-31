@@ -127,10 +127,10 @@ func requestOptimization(
 		)
 	}
 
-	apiKey := strings.TrimSpace(os.Getenv("ROUTING_API_KEY"))
+	apiKey := strings.TrimSpace(os.Getenv("ROUTING_SERVICE_URL"))
 	if apiKey == "" {
 		return CloudRouteResponse{}, errors.New(
-			"ROUTING_API_KEY is missing",
+			"ROUTING_SERVICE_URL is missing",
 		)
 	}
 
