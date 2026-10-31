@@ -1,5 +1,4 @@
 import React, {
-  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -7,592 +6,545 @@ import React, {
 } from 'react';
 
 import {
-  Upload,
   Navigation,
-  CheckCircle2,
-  AlertTriangle,
-  RefreshCw,
+  Upload,
   ExternalLink,
+  RefreshCw,
 } from 'lucide-react';
 
 import {
-  fetchRoutePlans,
   createRoutePlan,
-  updateRouteSegment,
   parseRouteScreenshots,
 } from '../services/api';
 
-const DESTINATIONS_PER_ROUTE = 10;
+import { usePlanner } from '../services/plannerStore';
 
-function validCoordinates(stop) {
-  if (
-    stop?.latitude == null ||
-    stop?.longitude == null ||
-    stop.latitude === '' ||
-    stop.longitude === ''
-  ) {
-    return false;
-  }
-
-  const latitude = Number(stop.latitude);
-  const longitude = Number(stop.longitude);
-
+function validPoint(point) {
   return (
-    Number.isFinite(latitude) &&
-    Number.isFinite(longitude) &&
-    latitude >= -90 &&
-    latitude <= 90 &&
-    longitude >= -180 &&
-    longitude <= 180 &&
-    !(latitude === 0 && longitude === 0)
+    point?.latitude != null &&
+    point?.longitude != null &&
+    Number.isFinite(Number(point.latitude)) &&
+    Number.isFinite(Number(point.longitude)) &&
+    Math.abs(Number(point.latitude)) <= 90 &&
+    Math.abs(Number(point.longitude)) <= 180 &&
+    !(
+      Number(point.latitude) === 0 &&
+      Number(point.longitude) === 0
+    )
   );
 }
 
-function coordinateKey(stop) {
-  return (
-    `${Number(stop.latitude).toFixed(6)},` +
-    `${Number(stop.longitude).toFixed(6)}`
-  );
-}
+const coordinateKey = (point) =>
+  `${Number(point.latitude).toFixed(6)},` +
+  `${Number(point.longitude).toFixed(6)}`;
 
-function groupDestinations(services) {
-  const groups = new Map();
+function destinationsOf(services) {
+  const grouped = new Map();
 
-  for (const service of services) {
-    if (!validCoordinates(service)) {
+  for (const item of services) {
+    if (!validPoint(item)) {
       continue;
     }
 
-    const key = coordinateKey(service);
+    const key = coordinateKey(item);
 
-    if (!groups.has(key)) {
-      groups.set(key, {
-        address: service.address,
-        latitude: Number(service.latitude),
-        longitude: Number(service.longitude),
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        address: item.address,
+        latitude: Number(item.latitude),
+        longitude: Number(item.longitude),
         services: [],
       });
     }
 
-    groups.get(key).services.push({
-      service_type: service.service_type || 'unknown',
+    grouped.get(key).services.push({
+      service_type: item.service_type || 'unknown',
     });
   }
 
-  return [...groups.values()];
+  return [...grouped.values()];
 }
 
-function describeError(error) {
-  const response = error.response?.data;
+const messageOf = (error) =>
+  error.response?.data?.error ||
+  error.message ||
+  'Request failed';
 
-  const message =
-    (typeof response?.error === 'string' && response.error) ||
-    error.message ||
-    'The request failed.';
-
-  const lines = [message];
-
-  if (response?.code) {
-    lines.push(`Code: ${response.code}`);
-  }
-
-  if (response?.request_id) {
-    lines.push(`Request ID: ${response.request_id}`);
-  }
-
-  if (Array.isArray(response?.attempts)) {
-    for (const attempt of response.attempts) {
-      const status = attempt.upstream_http_status
-        ? `HTTP ${attempt.upstream_http_status}`
-        : attempt.stage;
-
-      lines.push(
-        `${attempt.model}: ${status}` +
-          (attempt.message ? ` — ${attempt.message}` : '')
-      );
-    }
-  }
-
-  return lines.join('\n');
-}
-
-function sortedSegments(plan) {
-  return [...(plan?.segments || [])].sort(
-    (a, b) => a.sequence - b.sequence
-  );
-}
-
-function serviceCounts(services) {
-  const deliveries = services.filter(
-    (service) => service.service_type === 'delivery'
-  ).length;
-
-  const pickups = services.filter(
-    (service) => service.service_type === 'pickup'
-  ).length;
-
-  return {
-    deliveries,
-    pickups,
-    unknown: services.length - deliveries - pickups,
-  };
-}
+const dateOf = (value) =>
+  value
+    ? new Date(value).toLocaleString()
+    : 'Unknown';
 
 export default function RoutePlannerTab() {
-  const [complete, setComplete] = useState([]);
-  const [incomplete, setIncomplete] = useState([]);
-  const [plans, setPlans] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
+  const { store, view, identity } = usePlanner();
 
-  const [origin, setOrigin] = useState(null);
-  const [locationBusy, setLocationBusy] = useState(false);
-  const [locationMessage, setLocationMessage] = useState('');
+  const [online, setOnline] = useState(
+    navigator.onLine
+  );
+  const [working, setWorking] = useState('');
+  const [localError, setLocalError] = useState('');
 
-  const [parsing, setParsing] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [updating, setUpdating] = useState(false);
-
-  const [screenshotCount, setScreenshotCount] = useState(0);
-  const [tab, setTab] = useState('complete');
-  const [error, setError] = useState('');
-  const [retryGeneration, setRetryGeneration] = useState(0);
-
-  const aliveRef = useRef(false);
-  const locationSequenceRef = useRef(0);
-  const uploadSequenceRef = useRef(0);
-  const uploadBusyRef = useRef(false);
+  const alive = useRef(true);
+  const canConnect = online && !identity.localOnly;
+  const state = view.record?.state;
 
   const destinations = useMemo(
-    () => groupDestinations(complete),
-    [complete]
+    () => destinationsOf(state?.complete || []),
+    [state?.complete]
   );
 
-  const usableDestinations = useMemo(() => {
-    if (!origin) {
-      return destinations;
-    }
-
-    const startKey = coordinateKey(origin);
-
-    // A service at the starting position needs no driving stop.
-    return destinations.filter(
-      (stop) => coordinateKey(stop) !== startKey
-    );
-  }, [origin, destinations]);
-
-  const servicesAtStart = useMemo(() => {
-    if (!origin) {
-      return 0;
-    }
-
-    const startKey = coordinateKey(origin);
-
-    return complete.filter(
-      (service) =>
-        validCoordinates(service) &&
-        coordinateKey(service) === startKey
-    ).length;
-  }, [origin, complete]);
-
-  const expectedRouteCount = Math.ceil(
-    usableDestinations.length / DESTINATIONS_PER_ROUTE
+  const selected = state?.plans.find(
+    (plan) => plan.id === state.selectedId
   );
 
-  const busy = parsing || generating || updating;
+  const segments = [...(selected?.segments || [])].sort(
+    (a, b) => a.sequence - b.sequence
+  );
 
-  const requestLocation = useCallback(() => {
-    const sequence = ++locationSequenceRef.current;
-
-    setOrigin(null);
-    setLocationMessage('');
-    setError('');
-
-    if (!window.isSecureContext) {
-      setLocationBusy(false);
-      setLocationMessage(
-        'Open the platform over HTTPS or localhost to allow location access.'
-      );
-      return;
-    }
-
-    if (!navigator.geolocation) {
-      setLocationBusy(false);
-      setLocationMessage(
-        'This browser does not support location access.'
-      );
-      return;
-    }
-
-    setLocationBusy(true);
-    setLocationMessage('Getting your current location...');
-
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        if (
-          !aliveRef.current ||
-          sequence !== locationSequenceRef.current
-        ) {
-          return;
-        }
-
-        // Preserve the original coordinates returned by the browser.
-        // Do not round them or convert them into a street address.
-        const point = {
-          address: 'My current location',
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          accuracy: position.coords.accuracy,
-          capturedAt: position.timestamp,
-        };
-
-        if (!validCoordinates(point)) {
-          setLocationBusy(false);
-          setLocationMessage(
-            'The browser returned invalid location coordinates. Try again.'
-          );
-          return;
-        }
-
-        setOrigin(point);
-        setLocationBusy(false);
-        setLocationMessage(
-          'Your current coordinates are selected as the starting point.'
-        );
-      },
-      (locationError) => {
-        if (
-          !aliveRef.current ||
-          sequence !== locationSequenceRef.current
-        ) {
-          return;
-        }
-
-        const messages = {
-          1: 'Location permission was denied. Allow location access in your browser and try again.',
-          2: 'Your location is currently unavailable. Try again from your delivery device.',
-          3: 'Getting your location timed out. Try again.',
-        };
-
-        setLocationBusy(false);
-        setLocationMessage(
-          messages[locationError.code] ||
-            'Unable to obtain your current location.'
-        );
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 20000,
-        maximumAge: 60000,
-      }
-    );
-  }, []);
+  const stops = [...(selected?.stops || [])].sort(
+    (a, b) => a.sequence - b.sequence
+  );
 
   useEffect(() => {
-    aliveRef.current = true;
-    requestLocation();
+    alive.current = true;
 
-    let cancelled = false;
+    const change = () => setOnline(navigator.onLine);
 
-    fetchRoutePlans()
-      .then((data) => {
-        if (cancelled || !aliveRef.current) {
-          return;
-        }
-
-        const incoming = Array.isArray(data) ? data : [];
-
-        // Preserve a newly generated journey if this fetch finishes later.
-        setPlans((current) => {
-          const merged = new Map(
-            incoming.map((plan) => [plan.id, plan])
-          );
-
-          for (const plan of current) {
-            merged.set(plan.id, plan);
-          }
-
-          return [...merged.values()].sort(
-            (a, b) => b.id - a.id
-          );
-        });
-      })
-      .catch((err) => {
-        if (!cancelled && aliveRef.current) {
-          setError(describeError(err));
-        }
-      });
+    window.addEventListener('online', change);
+    window.addEventListener('offline', change);
 
     return () => {
-      cancelled = true;
-      aliveRef.current = false;
-      locationSequenceRef.current += 1;
-      uploadSequenceRef.current += 1;
+      alive.current = false;
+      window.removeEventListener('online', change);
+      window.removeEventListener('offline', change);
     };
-  }, [requestLocation]);
+  }, []);
 
-  const routePayload = useMemo(() => {
-    if (
-      !origin ||
-      !usableDestinations.length ||
-      parsing
-    ) {
-      return null;
+  async function recordError(error) {
+    const message = messageOf(error);
+
+    if (!alive.current) {
+      return;
     }
 
-    return {
+    setLocalError(message);
+
+    try {
+      await store.change((current) => ({
+        ...current,
+        phase: 'error',
+        error: message,
+      }));
+    } catch {
+      // Storage failures are displayed by the persistence layer.
+    }
+  }
+
+  async function generate(snapshot) {
+    if (
+      !navigator.onLine ||
+      identity.localOnly
+    ) {
+      return;
+    }
+
+    const current =
+      snapshot || store.getSnapshot().record.state;
+
+    if (!current.origin) {
+      return;
+    }
+
+    const destinations = destinationsOf(
+      current.complete
+    ).filter(
+      (stop) =>
+        coordinateKey(stop) !==
+        coordinateKey(current.origin)
+    );
+
+    if (!destinations.length) {
+      return;
+    }
+
+    if (destinations.length > 149) {
+      throw new Error(
+        'Use at most 149 unique destinations plus the starting point.'
+      );
+    }
+
+    setWorking('optimizing');
+
+    await store.change((s) => ({
+      ...s,
+      phase: 'optimizing',
+      error: '',
+    }));
+
+    const plan = await createRoutePlan({
       round_trip: false,
       stops: [
         {
           address: 'My current location',
-
-          // Original numeric coordinates, unchanged.
-          latitude: origin.latitude,
-          longitude: origin.longitude,
-
+          latitude: current.origin.latitude,
+          longitude: current.origin.longitude,
           services: [],
         },
-        ...usableDestinations,
+        ...destinations,
       ],
-    };
-  }, [origin, usableDestinations, parsing]);
+    });
 
-  useEffect(() => {
-    let cancelled = false;
-
-    setGenerating(false);
-
-    if (!routePayload) {
-      return;
-    }
-
-    if (routePayload.stops.length > 150) {
-      setError(
-        'The current routing service supports up to 149 unique destinations plus your starting location.'
+    if (
+      !plan?.id ||
+      !Array.isArray(plan.segments) ||
+      !plan.segments.length
+    ) {
+      throw new Error(
+        'Backend returned no route links.'
       );
-      return;
     }
 
-    setSelectedId(null);
-    setGenerating(true);
-    setError('');
+    // Preserve completed work even if the user switched tabs.
+    await store.change((s) => ({
+      ...s,
+      phase: 'ready',
+      error: '',
+      selectedId: plan.id,
+      plans: [
+        plan,
+        ...s.plans.filter(
+          (item) => item.id !== plan.id
+        ),
+      ].slice(0, 30),
+    }));
+  }
 
-    const timer = window.setTimeout(async () => {
-      try {
-        const plan = await createRoutePlan(routePayload);
-
-        if (cancelled || !aliveRef.current) {
-          return;
-        }
-
-        if (
-          !plan?.id ||
-          !Array.isArray(plan.segments) ||
-          !plan.segments.length
-        ) {
-          throw new Error(
-            'The backend returned no Google Maps routes.'
-          );
-        }
-
-        setPlans((current) => [
-          plan,
-          ...current.filter((item) => item.id !== plan.id),
-        ]);
-
-        setSelectedId(plan.id);
-      } catch (err) {
-        if (!cancelled && aliveRef.current) {
-          setError(describeError(err));
-        }
-      } finally {
-        if (!cancelled && aliveRef.current) {
-          setGenerating(false);
-        }
-      }
-    }, 500);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
-    };
-  }, [routePayload, retryGeneration]);
-
-  const uploadScreenshots = async (event) => {
-    const chosen = Array.from(event.target.files || []);
-
-    // Allow selecting the same screenshots again.
-    event.target.value = '';
-
-    if (!chosen.length || uploadBusyRef.current) {
-      return;
-    }
-
-    if (chosen.length > 10) {
-      setError('Select at most 10 screenshots per batch.');
-      return;
-    }
-
-    if (chosen.some((file) => file.size > 10 * 1024 * 1024)) {
-      setError('Each screenshot must be at most 10 MiB.');
-      return;
-    }
-
-    const sequence = ++uploadSequenceRef.current;
-    uploadBusyRef.current = true;
-
-    setParsing(true);
-    setError('');
-    setSelectedId(null);
-    setComplete([]);
-    setIncomplete([]);
-    setScreenshotCount(chosen.length);
+  async function locate() {
+    setWorking('locating');
+    setLocalError('');
 
     try {
-      const result = await parseRouteScreenshots(chosen);
-
       if (
-        !aliveRef.current ||
-        sequence !== uploadSequenceRef.current
-      ) {
-        return;
-      }
-
-      if (
-        !Array.isArray(result?.complete) &&
-        !Array.isArray(result?.uncomplete)
+        !navigator.geolocation ||
+        !window.isSecureContext
       ) {
         throw new Error(
-          'The backend returned an unexpected screenshot extraction response.'
+          'Location requires HTTPS or localhost and a supported browser.'
         );
       }
 
-      const parsedComplete = Array.isArray(result.complete)
-        ? result.complete
-        : [];
+      const position = await new Promise(
+        (resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(
+            resolve,
+            reject,
+            {
+              enableHighAccuracy: true,
+              timeout: 20000,
+              maximumAge: 60000,
+            }
+          )
+      );
 
-      const parsedIncomplete = Array.isArray(result.uncomplete)
-        ? result.uncomplete
-        : [];
+      const origin = {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracy: position.coords.accuracy,
+        capturedAt: position.timestamp,
+      };
 
-      const verified = [];
-      const invalid = [];
-
-      for (const service of parsedComplete) {
-        if (
-          validCoordinates(service) &&
-          typeof service.address === 'string' &&
-          service.address.trim()
-        ) {
-          verified.push(service);
-        } else {
-          invalid.push({
-            ...service,
-            status: 'uncomplete',
-            reason: 'Missing address or invalid coordinates.',
-          });
-        }
-      }
-
-      setComplete(verified);
-      setIncomplete([...parsedIncomplete, ...invalid]);
-      setTab('complete');
-
-      if (!verified.length) {
-        setError(
-          'No verified destinations were found. Upload clearer screenshots to try again.'
+      if (!validPoint(origin)) {
+        throw new Error(
+          'Browser returned invalid coordinates.'
         );
       }
-    } catch (err) {
-      if (
-        aliveRef.current &&
-        sequence === uploadSequenceRef.current
-      ) {
-        setError(describeError(err));
-      }
+
+      const record = await store.change((s) => ({
+        ...s,
+        origin,
+        error: '',
+      }));
+
+      await generate(record.state);
+    } catch (error) {
+      await recordError(error);
     } finally {
-      uploadBusyRef.current = false;
-
-      if (
-        aliveRef.current &&
-        sequence === uploadSequenceRef.current
-      ) {
-        setParsing(false);
+      if (alive.current) {
+        setWorking('');
       }
     }
-  };
+  }
 
-  const toggleRoute = async (segment) => {
-    if (!selectedId || updating) {
+  // Only a NEW journey requests location.
+  // Restoration never reruns Gemini or route generation.
+  useEffect(() => {
+    if (
+      view.phase === 'active' &&
+      view.fresh &&
+      store.consumeFresh()
+    ) {
+      if (canConnect) {
+        locate();
+      }
+    }
+  }, [
+    view.phase,
+    view.fresh,
+    canConnect,
+    store,
+  ]);
+
+  async function upload(event) {
+    const files = Array.from(
+      event.target.files || []
+    );
+
+    event.target.value = '';
+
+    if (
+      !files.length ||
+      working ||
+      !canConnect
+    ) {
       return;
     }
 
-    const planId = selectedId;
-    setUpdating(true);
-    setError('');
+    if (
+      files.length > 10 ||
+      files.some(
+        (file) => file.size > 10 * 1024 * 1024
+      )
+    ) {
+      setLocalError(
+        'Choose up to 10 screenshots, each at most 10 MiB.'
+      );
+      return;
+    }
+
+    setWorking('extracting');
+    setLocalError('');
 
     try {
-      await updateRouteSegment(
-        planId,
-        segment.id,
-        !segment.completed
-      );
+      await store.change((s) => ({
+        ...s,
+        phase: 'extracting',
+        error: '',
+        screenshotCount: files.length,
+      }));
 
-      if (!aliveRef.current) {
-        return;
+      const result = await parseRouteScreenshots(files);
+
+      if (
+        !Array.isArray(result.complete) &&
+        !Array.isArray(result.uncomplete)
+      ) {
+        throw new Error(
+          'Invalid extraction response.'
+        );
       }
 
-      setPlans((current) =>
-        current.map((plan) =>
-          plan.id === planId
-            ? {
-                ...plan,
-                segments: (plan.segments || []).map((item) =>
-                  item.id === segment.id
-                    ? {
-                        ...item,
-                        completed: !segment.completed,
-                      }
-                    : item
-                ),
-              }
-            : plan
-        )
-      );
-    } catch (err) {
-      if (aliveRef.current) {
-        setError(describeError(err));
-      }
+      const complete = (
+        result.complete || []
+      ).filter(validPoint);
+
+      const invalid = (
+        result.complete || []
+      )
+        .filter((item) => !validPoint(item))
+        .map((item) => ({
+          ...item,
+          reason: 'Invalid coordinates',
+        }));
+
+      const record = await store.change((s) => ({
+        ...s,
+        complete,
+        incomplete: [
+          ...(result.uncomplete || []),
+          ...invalid,
+        ],
+        tab: 'complete',
+        phase: 'extracted',
+        error: '',
+        selectedId: null,
+      }));
+
+      await generate(record.state);
+    } catch (error) {
+      await recordError(error);
     } finally {
-      if (aliveRef.current) {
-        setUpdating(false);
+      if (alive.current) {
+        setWorking('');
       }
     }
-  };
+  }
 
-  const selected = plans.find(
-    (plan) => plan.id === selectedId
-  );
+  async function run(action) {
+    setLocalError('');
 
-  const segments = sortedSegments(selected);
+    try {
+      await action();
+    } catch (error) {
+      setLocalError(messageOf(error));
+    }
+  }
 
-  const orderedStops = [...(selected?.stops || [])].sort(
-    (a, b) => a.sequence - b.sequence
-  );
+  if (view.phase === 'loading') {
+    return (
+      <p role="status">
+        Loading saved route planner…
+      </p>
+    );
+  }
 
-  const completedRoutes = segments.filter(
-    (segment) => segment.completed
-  ).length;
+  if (view.phase === 'error') {
+    return (
+      <p role="alert" className="text-red-300">
+        {view.error}
+      </p>
+    );
+  }
+
+  if (view.phase === 'choice') {
+    const previous = view.candidate?.state;
+
+    const plan = previous?.plans.find(
+      (item) => item.id === previous.selectedId
+    );
+
+    return (
+      <section className="terminal-card space-y-4 p-6">
+        <h2 className="text-xl font-semibold">
+          {previous
+            ? 'Restore your previous journey?'
+            : 'Start a new journey?'}
+        </h2>
+
+        {previous && (
+          <p>
+            {dateOf(view.candidate.updated_at)}
+            {' · '}
+            {destinationsOf(previous.complete).length}
+            {' '}destinations
+            {' · '}
+            {plan?.segments?.filter(
+              (item) => item.completed
+            ).length || 0}
+            /
+            {plan?.segments?.length || 0}
+            {' '}routes completed
+          </p>
+        )}
+
+        <p className="text-sm text-slate-400">
+          {view.status}
+        </p>
+
+        <div className="flex flex-wrap gap-3">
+          {previous && (
+            <button
+              className="terminal-button"
+              onClick={() =>
+                run(() => store.continuePrevious())
+              }
+            >
+              Continue previous journey
+            </button>
+          )}
+
+          <button
+            className="terminal-button-secondary"
+            onClick={() =>
+              run(() => store.startNew())
+            }
+          >
+            Start new journey
+          </button>
+        </div>
+
+        {localError && (
+          <p role="alert" className="text-red-300">
+            {localError}
+          </p>
+        )}
+      </section>
+    );
+  }
+
+  const patch = (change) =>
+    run(() => store.change(change));
 
   return (
     <div className="space-y-5">
-      <header>
-        <h2 className="text-2xl font-bold">Route Planner</h2>
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-2xl font-bold">
+            Route Planner
+          </h2>
 
-        <p className="mt-1 text-sm text-slate-400">
-          Select screenshots. Addresses and optimized routes are
-          generated automatically.
-        </p>
+          <p
+            role="status"
+            className="text-sm text-slate-400"
+          >
+            {view.status}
+          </p>
+        </div>
+
+        <button
+          className="terminal-button-secondary"
+          disabled={Boolean(working)}
+          onClick={() =>
+            store.emit({
+              phase: 'choice',
+              candidate: view.record,
+            })
+          }
+        >
+          Start new journey
+        </button>
       </header>
+
+      {!canConnect && (
+        <div className="rounded-xl border border-amber-500/30 p-4 text-amber-200">
+          Saved journey · {online ? 'local view' : 'offline'}.
+          Route links and addresses remain available.
+          Completion changes are queued on this device.
+        </div>
+      )}
+
+      {view.conflict && (
+        <section className="terminal-card space-y-3 p-4">
+          <h3 className="font-semibold">
+            A newer cloud copy exists
+          </h3>
+
+          <p>
+            Your device changes have not overwritten it.
+          </p>
+
+          <div className="flex flex-wrap gap-3">
+            <button
+              className="terminal-button"
+              disabled={Boolean(working)}
+              onClick={() =>
+                run(() => store.useCloud())
+              }
+            >
+              Use cloud copy
+            </button>
+
+            <button
+              className="terminal-button-secondary"
+              disabled={Boolean(working)}
+              onClick={() =>
+                run(() => store.keepDevice())
+              }
+            >
+              Keep this device copy
+            </button>
+          </div>
+        </section>
+      )}
 
       <section className="terminal-card space-y-3 p-4">
         <h3 className="flex items-center gap-2 font-semibold">
@@ -600,87 +552,40 @@ export default function RoutePlannerTab() {
           Starting location
         </h3>
 
-        {origin && (
-          <div className="space-y-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4">
-            <p className="font-semibold">
-              My current location
+        {state.origin ? (
+          <div className="space-y-2 break-words font-mono text-sm">
+            <p>
+              Latitude: {state.origin.latitude}
             </p>
 
-            <dl className="grid gap-3 text-sm sm:grid-cols-2">
-              <div>
-                <dt className="text-xs text-slate-400">
-                  Latitude
-                </dt>
+            <p>
+              Longitude: {state.origin.longitude}
+            </p>
 
-                <dd className="mt-1 break-all font-mono tabular-nums text-emerald-300">
-                  {origin.latitude}
-                </dd>
-              </div>
+            <p>
+              Estimated accuracy:{' '}
+              {Math.round(state.origin.accuracy)} m
+            </p>
 
-              <div>
-                <dt className="text-xs text-slate-400">
-                  Longitude
-                </dt>
-
-                <dd className="mt-1 break-all font-mono tabular-nums text-emerald-300">
-                  {origin.longitude}
-                </dd>
-              </div>
-
-              <div>
-                <dt className="text-xs text-slate-400">
-                  Estimated accuracy
-                </dt>
-
-                <dd className="mt-1 tabular-nums">
-                  {Number.isFinite(origin.accuracy)
-                    ? `Within approximately ${Math.round(origin.accuracy)} m`
-                    : 'Unavailable'}
-                </dd>
-              </div>
-
-              <div>
-                <dt className="text-xs text-slate-400">
-                  Location captured
-                </dt>
-
-                <dd className="mt-1">
-                  {new Date(origin.capturedAt).toLocaleString()}
-                </dd>
-              </div>
-            </dl>
-
-            <p className="text-xs text-slate-400">
-              These coordinates are used directly as your starting
-              point, without converting them into a street address.
+            <p className="font-sans text-slate-400">
+              Captured: {dateOf(state.origin.capturedAt)}
             </p>
           </div>
+        ) : (
+          <p>No starting coordinates saved.</p>
         )}
 
-        <p
-          role="status"
-          aria-live="polite"
-          className="text-sm text-slate-400"
-        >
-          {locationMessage ||
-            'Allow browser location access to set your starting point.'}
-        </p>
-
         <button
-          type="button"
           className="terminal-button-secondary"
-          disabled={busy || locationBusy}
-          onClick={requestLocation}
+          disabled={Boolean(working)}
+          onClick={locate}
         >
-          <Navigation size={16} />
-
-          {locationBusy
-            ? 'Getting location...'
-            : 'Refresh my location'}
+          <RefreshCw size={15} />
+          Refresh my location
         </button>
       </section>
 
-      <section className="terminal-card space-y-4 p-4">
+      <section className="terminal-card space-y-3 p-4">
         <h3 className="flex items-center gap-2 font-semibold">
           <Upload size={18} />
           Delivery screenshots
@@ -688,312 +593,232 @@ export default function RoutePlannerTab() {
 
         <input
           type="file"
-          accept="image/png,image/jpeg,image/webp"
           multiple
-          aria-label="Select delivery screenshots"
+          accept="image/png,image/jpeg,image/webp"
           className="terminal-input"
-          disabled={busy}
-          onChange={uploadScreenshots}
+          disabled={Boolean(working) || !canConnect}
+          onChange={upload}
         />
 
-        <p className="text-xs text-slate-400">
-          Select up to 10 screenshots. Processing starts immediately.
-          A new selection replaces the current batch.
+        <p className="text-sm text-slate-400">
+          {state.screenshotCount} screenshots ·{' '}
+          {destinations.length} unique destinations.
+          New screenshots replace the active address list.
         </p>
 
-        <div
-          role="status"
-          aria-live="polite"
-          className="text-sm text-cyan-300"
-        >
-          {parsing ? (
-            <>Extracting and verifying addresses...</>
-          ) : generating ? (
-            <>
-              Optimizing destinations and generating Google Maps links...
-            </>
-          ) : screenshotCount > 0 ? (
-            <>
-              {screenshotCount} screenshots ·{' '}
-              {usableDestinations.length} driving destinations ·{' '}
-              {expectedRouteCount} expected routes
-            </>
-          ) : (
-            <>Waiting for screenshots.</>
-          )}
-        </div>
+        <p role="status">
+          {working
+            ? `${working}…`
+            : `Saved processing state: ${state.phase}`}
+        </p>
 
-        {servicesAtStart > 0 && (
-          <p className="text-xs text-slate-400">
-            {servicesAtStart} services are already at your starting
-            location and need no driving stop.
-          </p>
-        )}
-
-        {origin && usableDestinations.length > 0 && !busy && (
-          <button
-            type="button"
-            className="terminal-button-secondary"
-            onClick={() =>
-              setRetryGeneration((current) => current + 1)
+        <button
+          className="terminal-button-secondary"
+          disabled={
+            Boolean(working) ||
+            !canConnect ||
+            !state.origin ||
+            !destinations.length
+          }
+          onClick={async () => {
+            try {
+              await generate();
+            } catch (error) {
+              await recordError(error);
+            } finally {
+              if (alive.current) {
+                setWorking('');
+              }
             }
-          >
-            <RefreshCw size={15} />
-            Regenerate routes
-          </button>
-        )}
+          }}
+        >
+          Regenerate routes
+        </button>
       </section>
 
-      {error && (
+      {(localError || view.error || state.error) && (
         <div
           role="alert"
-          className="whitespace-pre-wrap break-words rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300"
+          className="whitespace-pre-wrap rounded-xl border border-red-500/30 p-4 text-red-300"
         >
-          {error}
+          {localError || view.error || state.error}
         </div>
       )}
 
-      <section className="terminal-card space-y-4 p-4">
+      <section className="terminal-card space-y-3 p-4">
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            className={
-              tab === 'complete'
-                ? 'terminal-button'
-                : 'terminal-button-secondary'
-            }
-            onClick={() => setTab('complete')}
-          >
-            <CheckCircle2 size={16} />
-            Complete ({complete.length})
-          </button>
-
-          <button
-            type="button"
-            className={
-              tab === 'incomplete'
-                ? 'terminal-button'
-                : 'terminal-button-secondary'
-            }
-            onClick={() => setTab('incomplete')}
-          >
-            <AlertTriangle size={16} />
-            Incomplete ({incomplete.length})
-          </button>
+          {['complete', 'incomplete'].map((tab) => (
+            <button
+              key={tab}
+              className={
+                state.tab === tab
+                  ? 'terminal-button'
+                  : 'terminal-button-secondary'
+              }
+              onClick={() =>
+                patch((s) => ({ ...s, tab }))
+              }
+            >
+              {tab === 'complete'
+                ? `Complete (${state.complete.length})`
+                : `Incomplete (${state.incomplete.length})`}
+            </button>
+          ))}
         </div>
 
-        {tab === 'complete' ? (
-          <div className="space-y-3">
-            <p className="text-sm text-slate-400">
-              {complete.length} services across{' '}
-              {destinations.length} unique destinations.
-              Verified destinations are included automatically.
-            </p>
-
-            {!destinations.length && (
-              <p className="text-sm text-slate-400">
-                Verified addresses will appear here.
-              </p>
-            )}
-
-            {destinations.map((stop, index) => {
-              const counts = serviceCounts(stop.services);
-
-              return (
-                <div
-                  key={coordinateKey(stop)}
-                  className="rounded-xl border border-white/10 p-3"
-                >
-                  <p className="text-sm font-semibold">
-                    {index + 1}. {stop.address}
-                  </p>
-
-                  <p className="mt-1 text-xs text-slate-400">
-                    {counts.deliveries} deliveries ·{' '}
-                    {counts.pickups} pickups
-                    {counts.unknown > 0 &&
-                      ` · ${counts.unknown} unknown`}
-                  </p>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <p className="text-sm text-slate-400">
-              These addresses are excluded. Upload clearer
-              screenshots if you want to retry extraction;
-              no manual typing is required.
-            </p>
-
-            {!incomplete.length && (
-              <p className="text-sm text-slate-400">
-                No incomplete addresses.
-              </p>
-            )}
-
-            {incomplete.map((item, index) => (
+        {state.tab === 'complete'
+          ? destinations.map((stop, index) => (
               <div
-                key={`${index}-${item.service_type}`}
-                className="space-y-2 rounded-xl border border-amber-500/20 p-3"
+                key={coordinateKey(stop)}
+                className="rounded-lg border border-white/10 p-3"
               >
-                <p className="text-sm font-semibold">
-                  {item.address ||
-                    'Address could not be extracted'}
-                </p>
-
-                <p className="text-xs text-amber-300">
-                  {item.reason ||
-                    'Address could not be verified.'}
+                <p>
+                  {index + 1}. {stop.address}
                 </p>
 
                 <p className="text-xs text-slate-400">
-                  Service: {item.service_type || 'unknown'}
+                  {stop.services.length} services
+                </p>
+              </div>
+            ))
+          : state.incomplete.map((item, index) => (
+              <div
+                key={index}
+                className="rounded-lg border border-amber-500/20 p-3"
+              >
+                <p>
+                  {item.address || 'Address unavailable'}
+                </p>
+
+                <p className="text-sm text-amber-300">
+                  {item.reason}
                 </p>
               </div>
             ))}
-          </div>
-        )}
       </section>
 
-      {selected && !parsing && !generating && (
+      {selected && (
         <section className="terminal-card space-y-4 p-4">
-          <h3 className="text-lg font-semibold">
+          <h3 className="font-semibold">
             Optimized routes
           </h3>
 
-          <p className="text-sm text-slate-400">
-            {segments.length} Google Maps links ·{' '}
-            {(Number(selected.distance_m || 0) / 1000).toFixed(1)} km
-            {' · '}
-            {Math.round(Number(selected.duration_s || 0) / 60)}
+          <p>
+            {segments.length} links ·{' '}
+            {(Number(selected.distance_m) / 1000).toFixed(1)}
+            {' '}km ·{' '}
+            {Math.round(Number(selected.duration_s) / 60)}
             {' '}minutes driving
           </p>
 
-          <p className="text-xs text-slate-400">
-            Follow the routes in order. Each starts where the
-            previous route ends.{' '}
-            {completedRoutes}/{segments.length} completed.
-          </p>
+          {segments.map((segment, index) => {
+            const label =
+              `Route ${index + 1} of ${segments.length}`;
 
-          <div className="space-y-3">
-            {segments.map((segment, index) => {
-              const start = orderedStops.find(
-                (stop) =>
-                  stop.sequence === segment.start_stop
-              );
+            const visited = stops.filter(
+              (stop) =>
+                stop.sequence > segment.start_stop &&
+                stop.sequence <= segment.end_stop
+            );
 
-              const end = orderedStops.find(
-                (stop) =>
-                  stop.sequence === segment.end_stop
-              );
+            const from = stops.find(
+              (stop) =>
+                stop.sequence === segment.start_stop
+            );
 
-              const visited = orderedStops.filter(
-                (stop) =>
-                  stop.sequence > segment.start_stop &&
-                  stop.sequence <= segment.end_stop
-              );
+            return (
+              <article
+                key={segment.id}
+                className="space-y-3 rounded-xl border border-white/10 p-4"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="font-semibold">
+                    {label}
+                  </h4>
 
-              const serviceCount = visited.reduce(
-                (total, stop) =>
-                  total + (stop.services?.length || 0),
-                0
-              );
+                  <label className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(segment.completed)}
+                      onChange={() =>
+                        patch((s) => ({
+                          ...s,
+                          plans: s.plans.map((plan) =>
+                            plan.id !== selected.id
+                              ? plan
+                              : {
+                                  ...plan,
+                                  segments: plan.segments.map(
+                                    (item) =>
+                                      item.id === segment.id
+                                        ? {
+                                            ...item,
+                                            completed: !item.completed,
+                                          }
+                                        : item
+                                  ),
+                                }
+                          ),
+                        }))
+                      }
+                    />
+                    Done
+                  </label>
+                </div>
 
-              const label =
-                `Route ${index + 1} of ${segments.length}`;
+                <p className="text-sm text-slate-400">
+                  From: {from?.address}
+                  {' · '}
+                  {visited.length} destinations
+                </p>
 
-              return (
-                <article
-                  key={segment.id}
-                  className="space-y-3 rounded-xl border border-white/10 p-4"
+                <a
+                  href={segment.google_maps_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="terminal-button inline-flex items-center gap-2"
                 >
-                  <div className="flex items-center justify-between gap-3">
-                    <h4 className="font-semibold">
-                      {label}
-                    </h4>
+                  Open {label} in Google Maps
+                  <ExternalLink size={16} />
+                </a>
 
-                    <label className="flex items-center gap-2 text-sm">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(segment.completed)}
-                        disabled={busy}
-                        onChange={() => toggleRoute(segment)}
-                      />
-                      Done
-                    </label>
-                  </div>
+                <details>
+                  <summary>View destinations</summary>
 
-                  <p className="text-xs text-slate-400">
-                    {visited.length} destinations ·{' '}
-                    {serviceCount} services
-                  </p>
-
-                  <p className="text-sm">
-                    <span className="text-slate-400">
-                      From:{' '}
-                    </span>
-                    {start?.address || 'Starting location'}
-                  </p>
-
-                  <p className="text-sm">
-                    <span className="text-slate-400">
-                      To:{' '}
-                    </span>
-                    {end?.address || 'Final destination'}
-                  </p>
-
-                  <a
-                    href={segment.google_maps_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="terminal-button inline-flex items-center gap-2"
-                  >
-                    <Navigation size={17} />
-                    Open {label} in Google Maps
-                    <ExternalLink size={16} />
-                  </a>
-
-                  <details className="rounded-lg border border-white/10 p-3">
-                    <summary className="cursor-pointer text-sm">
-                      View optimized destinations
-                    </summary>
-
-                    <ol className="mt-3 space-y-2">
-                      {visited.map((stop, stopIndex) => (
-                        <li
-                          key={stop.id ?? stop.sequence}
-                          className="text-sm"
-                        >
-                          {stopIndex + 1}. {stop.address}
-                        </li>
-                      ))}
-                    </ol>
-                  </details>
-                </article>
-              );
-            })}
-          </div>
+                  <ol className="mt-2 space-y-2">
+                    {visited.map((stop, n) => (
+                      <li key={stop.sequence}>
+                        {n + 1}. {stop.address}
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+              </article>
+            );
+          })}
         </section>
       )}
 
-      {plans.length > 0 && (
+      {state.plans.length > 0 && (
         <section className="terminal-card space-y-3 p-4">
           <h3 className="font-semibold">
             Saved journeys
           </h3>
 
           <div className="flex flex-wrap gap-2">
-            {plans.map((plan) => (
+            {state.plans.map((plan) => (
               <button
-                type="button"
                 key={plan.id}
-                disabled={busy}
-                onClick={() => setSelectedId(plan.id)}
                 className={
-                  selectedId === plan.id
+                  plan.id === state.selectedId
                     ? 'terminal-button'
                     : 'terminal-button-secondary'
+                }
+                onClick={() =>
+                  patch((s) => ({
+                    ...s,
+                    selectedId: plan.id,
+                  }))
                 }
               >
                 Journey #{plan.id} ·{' '}

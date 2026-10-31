@@ -1,169 +1,283 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
+import React, { useEffect, useState } from 'react';
+import {
+  GoogleOAuthProvider,
+  GoogleLogin,
+} from '@react-oauth/google';
+
 import { authAPI } from './services/http';
+import RoutePlannerTab from './components/RoutePlannerTab';
+
+import {
+  PlannerIdentity,
+  lastPlannerUser,
+  readPlanner,
+  rememberPlannerUser,
+  resetPlannerSession,
+} from './services/plannerStore';
 
 const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 
-function AuthenticationScreen({ onAuthenticated, error, setError, busy }) {
-  return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
-      <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-8 shadow-xl text-center">
-        <div className="text-3xl mb-3">🔐</div>
-
-        <h1 className="text-2xl font-bold mb-2">MyPlatform</h1>
-
-        <p className="text-slate-400 text-sm mb-8">
-          Sign in with your authorized Google account to access the dashboard.
-        </p>
-
-        <div className="flex justify-center">
-          <GoogleLogin
-            onSuccess={onAuthenticated}
-            onError={() => setError('Google sign-in failed. Please try again.')}
-            useOneTap={false}
-          />
-        </div>
-
-        {busy && (
-          <p className="mt-5 text-sm text-blue-400">
-            Verifying your account...
-          </p>
-        )}
-
-        {error && (
-          <p className="mt-5 rounded bg-red-950 border border-red-800 p-3 text-sm text-red-300">
-            {error}
-          </p>
-        )}
-
-        <p className="text-xs text-slate-500 mt-8">
-          Sessions expire after 10 minutes of inactivity.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 export default function AuthGate({ children }) {
   const [user, setUser] = useState(null);
+  const [remembered, setRemembered] = useState(null);
+  const [localOnly, setLocalOnly] = useState(false);
   const [checking, setChecking] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const checkSession = useCallback(async () => {
-    try {
-      const response = await authAPI.get('/auth/me');
-
-      if (response.data?.authenticated !== true) {
-        throw new Error('Invalid authentication response');
-      }
-
-      setUser(response.data);
-      return true;
-    } catch (err) {
-      setUser(null);
-
-      if (err.response?.status !== 401) {
-        setError('Unable to verify the session. Check the API connection.');
-      }
-
-      return false;
-    } finally {
-      setChecking(false);
+  async function accept(data) {
+    if (
+      data?.authenticated !== true ||
+      !data.user_id
+    ) {
+      throw new Error(
+        'Authentication response is missing user_id. ' +
+        'Deploy the updated backend.'
+      );
     }
-  }, []);
+
+    const identity = {
+      user_id: data.user_id,
+      email: data.email,
+    };
+
+    await rememberPlannerUser(identity);
+    resetPlannerSession();
+
+    setRemembered(identity);
+    setLocalOnly(false);
+    setUser(identity);
+  }
 
   useEffect(() => {
-    checkSession();
+    let cancelled = false;
 
-    const handleExpiredSession = () => {
-      setUser(null);
-      setError('Your session expired. Please sign in again.');
-    };
+    async function boot() {
+      let saved = null;
 
-    window.addEventListener('auth:expired', handleExpiredSession);
+      try {
+        const identity = await lastPlannerUser();
 
-    return () => {
-      window.removeEventListener('auth:expired', handleExpiredSession);
-    };
-  }, [checkSession]);
+        if (
+          identity &&
+          await readPlanner(identity.user_id)
+        ) {
+          saved = identity;
+        }
 
-  const handleGoogleSuccess = async (credentialResponse) => {
-    if (!credentialResponse.credential) {
-      setError('Google did not return an identity credential.');
-      return;
+        if (!cancelled) {
+          setRemembered(saved);
+        }
+
+        if (!navigator.onLine) {
+          if (!cancelled && saved) {
+            setUser(saved);
+            setLocalOnly(true);
+          }
+
+          return;
+        }
+
+        const { data } = await authAPI.get(
+          '/auth/me',
+          { timeout: 10000 }
+        );
+
+        if (!cancelled) {
+          await accept(data);
+        }
+      } catch (err) {
+        if (cancelled) {
+          return;
+        }
+
+        if (!err.response && saved) {
+          setUser(saved);
+          setLocalOnly(true);
+        } else if (err.response?.status !== 401) {
+          setError(err.message);
+        }
+      } finally {
+        if (!cancelled) {
+          setChecking(false);
+        }
+      }
     }
 
+    boot();
+
+    const expired = () => {
+      resetPlannerSession();
+      setUser(null);
+      setLocalOnly(false);
+
+      setError(
+        'Sign in again to synchronize. ' +
+        'Your saved journey remains on this device.'
+      );
+    };
+
+    window.addEventListener('auth:expired', expired);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('auth:expired', expired);
+    };
+  }, []);
+
+  async function login(result) {
     setBusy(true);
     setError('');
 
     try {
-      const response = await authAPI.post('/auth/google', {
-        credential: credentialResponse.credential,
-      });
+      const { data } = await authAPI.post(
+        '/auth/google',
+        { credential: result.credential }
+      );
 
-      if (response.data?.authenticated !== true) {
-        throw new Error('Invalid authentication response');
-      }
-
-      setUser(response.data);
+      await accept(data);
     } catch (err) {
       setError(
-        err.response?.data?.error ||
-        'Unable to authenticate. Check your Google account and backend configuration.'
+        err.response?.data?.error || err.message
       );
     } finally {
       setBusy(false);
     }
-  };
+  }
 
-  const handleLogout = async () => {
+  async function logout() {
+    setBusy(true);
+    setError('');
+
     try {
       await authAPI.post('/auth/logout', {});
-      setUser(null);
-      setError('');
-    } catch (err) {
-      setError('Unable to log out. Please try again.');
-    }
-  };
+      resetPlannerSession();
+      await rememberPlannerUser(null);
 
-  if (!clientId) {
+      setUser(null);
+      setRemembered(null);
+      setLocalOnly(false);
+    } catch (err) {
+      setError(
+        err.response?.data?.error || err.message
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (checking) {
     return (
-      <div className="min-h-screen bg-slate-950 text-red-300 p-8">
-        Missing VITE_GOOGLE_CLIENT_ID in the frontend build.
+      <div className="p-8 text-slate-300">
+        Checking session and saved journey…
       </div>
     );
   }
 
-  return (
-    <GoogleOAuthProvider clientId={clientId}>
-      {checking ? (
-        <div className="min-h-screen bg-slate-950 text-slate-300 flex items-center justify-center">
-          Checking session...
-        </div>
-      ) : !user ? (
-        <AuthenticationScreen
-          onAuthenticated={handleGoogleSuccess}
-          error={error}
-          setError={setError}
-          busy={busy}
-        />
-      ) : (
-        <>
-          <div className="bg-slate-900 text-slate-200 border-b border-slate-700 px-6 py-2 flex justify-end items-center gap-4 text-sm">
-            <span className="text-slate-400">{user.email}</span>
+  if (user) {
+    return (
+      <PlannerIdentity.Provider
+        value={{ ...user, localOnly }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900 px-6 py-3 text-sm text-slate-200">
+          <span>
+            {user.email}
+            {localOnly ? ' · Saved device copy' : ''}
+          </span>
 
+          {localOnly ? (
             <button
-              onClick={handleLogout}
-              className="rounded bg-slate-700 hover:bg-slate-600 px-3 py-1"
+              className="terminal-button-secondary"
+              onClick={() => {
+                resetPlannerSession();
+                setUser(null);
+                setLocalOnly(false);
+              }}
+            >
+              Sign in to synchronize
+            </button>
+          ) : (
+            <button
+              className="terminal-button-secondary"
+              disabled={busy}
+              onClick={logout}
             >
               Sign out
             </button>
-          </div>
+          )}
+        </div>
 
-          {children}
-        </>
-      )}
-    </GoogleOAuthProvider>
+        {error && (
+          <p
+            role="alert"
+            className="bg-slate-900 px-6 py-3 text-red-300"
+          >
+            {error}
+          </p>
+        )}
+
+        {localOnly ? (
+          <main className="min-h-screen bg-slate-950 p-4 text-slate-100 md:p-8">
+            <RoutePlannerTab />
+          </main>
+        ) : (
+          children
+        )}
+      </PlannerIdentity.Provider>
+    );
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-950 p-6 text-slate-100">
+      <section className="w-full max-w-md space-y-5 rounded-xl border border-slate-800 bg-slate-900 p-8 text-center">
+        <h1 className="text-2xl font-bold">
+          MyPlatform
+        </h1>
+
+        <p>
+          Sign in to access and synchronize your workspace.
+        </p>
+
+        {clientId ? (
+          <GoogleOAuthProvider clientId={clientId}>
+            <GoogleLogin
+              onSuccess={login}
+              onError={() =>
+                setError('Google sign-in failed.')
+              }
+              useOneTap={false}
+            />
+          </GoogleOAuthProvider>
+        ) : (
+          <p>Missing VITE_GOOGLE_CLIENT_ID.</p>
+        )}
+
+        {busy && <p>Signing in…</p>}
+
+        {error && (
+          <p role="alert" className="text-red-300">
+            {error}
+          </p>
+        )}
+
+        {remembered && (
+          <button
+            className="terminal-button-secondary"
+            onClick={() => {
+              resetPlannerSession();
+              setUser(remembered);
+              setLocalOnly(true);
+            }}
+          >
+            Open saved journey on this device
+          </button>
+        )}
+
+        <p className="text-xs text-slate-400">
+          The local view does not authenticate you or
+          grant access to backend APIs.
+        </p>
+      </section>
+    </div>
   );
 }

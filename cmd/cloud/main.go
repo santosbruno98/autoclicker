@@ -48,7 +48,6 @@ func main() {
 
 	router := gin.New()
 
-	// CORS must run before session authentication.
 	router.Use(
 		gin.Logger(),
 		gin.Recovery(),
@@ -73,20 +72,17 @@ func main() {
 
 	api := authenticated.Group("/api/v1")
 	{
-		// Tasks
 		api.POST("/tasks", handlers.CreateTask)
 		api.GET("/tasks", handlers.GetTasks)
 		api.GET("/tasks/:id", handlers.GetTaskByID)
 		api.PUT("/tasks/:id", handlers.UpdateTask)
 		api.DELETE("/tasks/:id", handlers.DeleteTask)
 
-		// Notes
 		api.GET("/notes", handlers.GetNotes)
 		api.POST("/notes", handlers.CreateNote)
 		api.PUT("/notes/:id", handlers.UpdateNote)
 		api.DELETE("/notes/:id", handlers.DeleteNote)
 
-		// Portfolio
 		api.GET("/portfolio/holdings", handlers.GetHoldings)
 		api.POST("/portfolio/holdings", handlers.CreateHolding)
 		api.PUT("/portfolio/holdings/:id", handlers.UpdateHolding)
@@ -94,25 +90,24 @@ func main() {
 
 		api.GET("/portfolio/summary", handlers.GetPortfolioSummary)
 		api.GET("/portfolio/history", handlers.GetPortfolioHistory)
-
 		api.GET("/portfolio/buyingPower", handlers.GetBuyingPower)
 		api.PUT("/portfolio/buyingPower", handlers.UpdateBuyingPower)
-
 		api.GET("/portfolio/dividends", handlers.GetPortfolioDividends)
 
-		// Price thresholds
 		api.GET("/portfolio/thresholds", handlers.GetPriceThresholds)
 		api.GET("/portfolio/thresholds/:id", handlers.GetPriceThreshold)
 		api.POST("/portfolio/thresholds", handlers.CreatePriceThreshold)
 		api.PUT("/portfolio/thresholds/:id", handlers.UpdatePriceThreshold)
 		api.DELETE("/portfolio/thresholds/:id", handlers.DeleteThreshold)
 
-		// Market data and PDF processing
 		api.GET("/market/quotes", handlers.GetMarketQuotes)
 		api.POST("/market/documents", handlers.ProcessMarketPDF)
 		api.GET("/market/benchmark/history", handlers.GetBenchmarkHistory)
 
-		// Routing
+		// Snapshots are scoped to the authenticated Google user.
+		api.GET("/route-planner/state", authService.GetPlanner)
+		api.PUT("/route-planner/state", authService.SavePlanner)
+
 		api.POST("/routes", handlers.CreateRoutePlan)
 		api.GET("/routes", handlers.ListRoutePlans)
 		api.PATCH(
@@ -123,15 +118,12 @@ func main() {
 		api.POST("/routes/verify-address", handlers.VerifyRouteAddress)
 	}
 
-	// Existing Grafana webhook
 	router.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
 
 	log.Println("=== REGISTERED API ROUTES ===")
-
 	for _, route := range router.Routes() {
 		log.Printf("%-7s %s", route.Method, route.Path)
 	}
-
 	log.Println("=============================")
 
 	if err := router.Run("0.0.0.0:" + port); err != nil {
