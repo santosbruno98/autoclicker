@@ -1,4 +1,3 @@
-
 steps:
   - id: Build
     name: gcr.io/cloud-builders/docker
@@ -7,14 +6,14 @@ steps:
       - -f
       - Dockerfile
       - -t
-      - europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$COMMIT_SHA
+      - europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$BUILD_ID
       - .
 
   - id: Push
     name: gcr.io/cloud-builders/docker
     args:
       - push
-      - europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$COMMIT_SHA
+      - europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$BUILD_ID
 
   - id: Deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -23,13 +22,14 @@ steps:
       - run
       - deploy
       - autoclicker-api
-      - --image=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$COMMIT_SHA
+      - --image=europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$BUILD_ID
       - --region=europe-west1
       - --project=$PROJECT_ID
       - --allow-unauthenticated
+      - --quiet
 
 images:
-  - europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$COMMIT_SHA
+  - europe-west1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/autoclicker-api:$BUILD_ID
 
 options:
   logging: CLOUD_LOGGING_ONLY
