@@ -127,16 +127,19 @@ func requestOptimization(
 		)
 	}
 
-	apiKey := strings.TrimSpace(os.Getenv("ROUTING_SERVICE_URL"))
+	apiKey := strings.TrimSpace(os.Getenv("ROUTING_API_KEY"))
 	if apiKey == "" {
 		return CloudRouteResponse{}, errors.New(
-			"ROUTING_SERVICE_URL is missing",
+			"ROUTING_API_KEY is missing",
 		)
 	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return CloudRouteResponse{}, err
+		return CloudRouteResponse{}, fmt.Errorf(
+			"cannot encode routing request: %w",
+			err,
+		)
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -146,7 +149,10 @@ func requestOptimization(
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return CloudRouteResponse{}, err
+		return CloudRouteResponse{}, fmt.Errorf(
+			"cannot create routing request: %w",
+			err,
+		)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -158,6 +164,7 @@ func requestOptimization(
 
 	resp, err := client.Do(req)
 	if err != nil {
+		// Preserve cancellation/deadline errors for the calling handler.
 		return CloudRouteResponse{}, fmt.Errorf(
 			"routing service request failed: %w",
 			err,
@@ -166,15 +173,26 @@ func requestOptimization(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(
+		message, readErr := io.ReadAll(
 			io.LimitReader(resp.Body, 2048),
 		)
 
+		if readErr != nil {
+			return CloudRouteResponse{}, fmt.Errorf(
+				"routing service HTTP %d: cannot read error response",
+				resp.StatusCode,
+			)
+		}
+
 		detail := strings.ReplaceAll(
-			string(message),
+			strings.TrimSpace(string(message)),
 			apiKey,
 			"[REDACTED]",
 		)
+
+		if detail == "" {
+			detail = http.StatusText(resp.StatusCode)
+		}
 
 		return CloudRouteResponse{}, fmt.Errorf(
 			"routing service HTTP %d: %s",
@@ -191,6 +209,12 @@ func requestOptimization(
 		return CloudRouteResponse{}, fmt.Errorf(
 			"invalid routing service response: %w",
 			err,
+		)
+	}
+
+	if !validOptimization(result, len(payload.Coordinates)) {
+		return CloudRouteResponse{}, errors.New(
+			"routing service returned an invalid stop order or route metrics",
 		)
 	}
 
