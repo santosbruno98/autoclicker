@@ -104,18 +104,31 @@ func (s *Service) command(
 }
 
 func NewService(ctx context.Context) (*Service, error) {
+	endpoint := strings.TrimSpace(
+		os.Getenv("UPSTASH_REDIS_REST_URL"),
+	)
+
+	if endpoint == "" {
+		endpoint = "https://stirred-mallard-218027.upstash.io"
+	}
+
 	s := &Service{
-		endpoint: strings.TrimRight(
-			strings.TrimSpace(os.Getenv("UPSTASH_REDIS_REST_URL")),
-			"/",
+		endpoint: strings.TrimRight(endpoint, "/"),
+		token: strings.TrimSpace(
+			os.Getenv("UPSTASH_REDIS_REST_TOKEN"),
 		),
-		token:    strings.TrimSpace(os.Getenv("UPSTASH_REDIS_REST_TOKEN")),
-		clientID: os.Getenv("GOOGLE_CLIENT_ID"),
+		clientID: strings.TrimSpace(
+			os.Getenv("GOOGLE_CLIENT_ID"),
+		),
 		allowedEmail: strings.ToLower(
-			strings.TrimSpace(os.Getenv("GOOGLE_ALLOWED_EMAIL")),
+			strings.TrimSpace(
+				os.Getenv("GOOGLE_ALLOWED_EMAIL"),
+			),
 		),
 		allowedOrigin: strings.TrimRight(
-			os.Getenv("FRONTEND_ORIGIN"),
+			strings.TrimSpace(
+				os.Getenv("FRONTEND_ORIGIN"),
+			),
 			"/",
 		),
 		client: &http.Client{
@@ -123,15 +136,28 @@ func NewService(ctx context.Context) (*Service, error) {
 		},
 	}
 
-	if s.endpoint == "" ||
-		s.token == "" ||
-		s.clientID == "" ||
-		s.allowedEmail == "" ||
-		s.allowedOrigin == "" {
-		return nil, errors.New(
-			"UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, " +
-				"GOOGLE_CLIENT_ID, GOOGLE_ALLOWED_EMAIL and " +
-				"FRONTEND_ORIGIN are required",
+	required := []struct {
+		name  string
+		value string
+	}{
+		{"UPSTASH_REDIS_REST_TOKEN", s.token},
+		{"GOOGLE_CLIENT_ID", s.clientID},
+		{"GOOGLE_ALLOWED_EMAIL", s.allowedEmail},
+		{"FRONTEND_ORIGIN", s.allowedOrigin},
+	}
+
+	missing := make([]string, 0)
+
+	for _, variable := range required {
+		if variable.value == "" {
+			missing = append(missing, variable.name)
+		}
+	}
+
+	if len(missing) > 0 {
+		return nil, fmt.Errorf(
+			"missing required environment variables: %s",
+			strings.Join(missing, ", "),
 		)
 	}
 
@@ -140,7 +166,8 @@ func NewService(ctx context.Context) (*Service, error) {
 		u.Scheme != "https" ||
 		u.Host == "" ||
 		u.User != nil ||
-		u.RawQuery != "" {
+		u.RawQuery != "" ||
+		u.Fragment != "" {
 		return nil, errors.New(
 			"UPSTASH_REDIS_REST_URL must be an HTTPS endpoint",
 		)
@@ -149,11 +176,17 @@ func NewService(ctx context.Context) (*Service, error) {
 	var pong string
 
 	if err := s.command(ctx, &pong, "PING"); err != nil {
-		return nil, err
+		return nil, fmt.Errorf(
+			"Upstash initialization failed: %w",
+			err,
+		)
 	}
 
 	if pong != "PONG" {
-		return nil, errors.New("invalid Upstash PING response")
+		return nil, fmt.Errorf(
+			"unexpected Upstash PING response: %q",
+			pong,
+		)
 	}
 
 	return s, nil
