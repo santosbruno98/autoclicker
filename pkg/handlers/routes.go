@@ -127,10 +127,15 @@ func requestOptimization(
 		)
 	}
 
-	apiKey := strings.TrimSpace(os.Getenv("ROUTING_API_KEY"))
-	if apiKey == "" {
+	parsed, err := url.Parse(endpoint)
+	if err != nil ||
+		parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.User != nil ||
+		parsed.RawQuery != "" ||
+		parsed.Fragment != "" {
 		return CloudRouteResponse{}, errors.New(
-			"ROUTING_API_KEY is missing",
+			"ROUTING_SERVICE_URL must be an HTTP or HTTPS base URL",
 		)
 	}
 
@@ -156,15 +161,15 @@ func requestOptimization(
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
 
+	// No custom routing API key is required.
 	client := &http.Client{
 		Timeout: 180 * time.Second,
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		// Preserve cancellation/deadline errors for the calling handler.
 		return CloudRouteResponse{}, fmt.Errorf(
 			"routing service request failed: %w",
 			err,
@@ -176,7 +181,6 @@ func requestOptimization(
 		message, readErr := io.ReadAll(
 			io.LimitReader(resp.Body, 2048),
 		)
-
 		if readErr != nil {
 			return CloudRouteResponse{}, fmt.Errorf(
 				"routing service HTTP %d: cannot read error response",
@@ -184,12 +188,7 @@ func requestOptimization(
 			)
 		}
 
-		detail := strings.ReplaceAll(
-			strings.TrimSpace(string(message)),
-			apiKey,
-			"[REDACTED]",
-		)
-
+		detail := strings.TrimSpace(string(message))
 		if detail == "" {
 			detail = http.StatusText(resp.StatusCode)
 		}
@@ -201,15 +200,32 @@ func requestOptimization(
 		)
 	}
 
-	var result CloudRouteResponse
+	// Pointers distinguish omitted metrics from a legitimate zero.
+	var decoded struct {
+		Order     []int    `json:"order"`
+		DistanceM *float64 `json:"distance_m"`
+		DurationS *float64 `json:"duration_s"`
+	}
 
 	if err := json.NewDecoder(
 		io.LimitReader(resp.Body, 1<<20),
-	).Decode(&result); err != nil {
+	).Decode(&decoded); err != nil {
 		return CloudRouteResponse{}, fmt.Errorf(
 			"invalid routing service response: %w",
 			err,
 		)
+	}
+
+	if decoded.DistanceM == nil || decoded.DurationS == nil {
+		return CloudRouteResponse{}, errors.New(
+			"routing service response is missing distance_m or duration_s",
+		)
+	}
+
+	result := CloudRouteResponse{
+		Order:     decoded.Order,
+		DistanceM: *decoded.DistanceM,
+		DurationS: *decoded.DurationS,
 	}
 
 	if !validOptimization(result, len(payload.Coordinates)) {

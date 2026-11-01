@@ -1,51 +1,46 @@
-
 import asyncio
-import hmac
 import json
 import math
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+
 
 app = FastAPI(title="Guarda VROOM + OSRM Routing")
 
-API_KEY = os.getenv("ROUTING_API_KEY", "")
-VROOM_BIN = os.getenv("VROOM_BIN", "/usr/local/bin/vroom")
-OSRM_HOST = os.getenv("OSRM_HOST", "127.0.0.1")
-OSRM_PORT = os.getenv("OSRM_PORT", "5000")
+VROOM_BIN: str = os.getenv("VROOM_BIN", "/usr/local/bin/vroom")
+OSRM_HOST: str = os.getenv("OSRM_HOST", "127.0.0.1")
+OSRM_PORT: str = os.getenv("OSRM_PORT", "5000")
 
 
 class OptimizeRequest(BaseModel):
+    # Coordinate order: longitude, latitude.
+    # First coordinate is the starting location.
     coordinates: list[tuple[float, float]] = Field(
         min_length=2,
-        max_length=150
+        max_length=150,
     )
     round_trip: bool = False
 
 
+class OptimizeResponse(BaseModel):
+    order: list[int]
+    distance_m: float
+    duration_s: float
+
+
 @app.get("/health")
-async def health():
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/optimize")
-async def optimize(
-    request: OptimizeRequest,
-    authorization: str = Header(default="")
-):
-    if not API_KEY or not hmac.compare_digest(
-        authorization,
-        f"Bearer {API_KEY}"
-    ):
-        raise HTTPException(
-            status_code=401,
-            detail="Unauthorized"
-        )
-
-    points = request.coordinates
+@app.post("/optimize", response_model=OptimizeResponse)
+async def optimize(request: OptimizeRequest) -> OptimizeResponse:
+    points: list[tuple[float, float]] = request.coordinates
 
     for longitude, latitude in points:
         if not (
@@ -56,127 +51,165 @@ async def optimize(
         ):
             raise HTTPException(
                 status_code=400,
-                detail="Invalid coordinates"
+                detail="Invalid coordinates",
             )
 
-    depot = list(points[0])
+    depot: list[float] = list(points[0])
 
-    vehicle = {
+    vehicle: dict[str, Any] = {
         "id": 1,
         "profile": "car",
-        "start": depot
+        "start": depot,
     }
 
     if request.round_trip:
         vehicle["end"] = depot
 
-    jobs = [
+    jobs: list[dict[str, Any]] = [
         {
             "id": index,
             "location": list(points[index]),
-            "service": 0
+            "service": 0,
         }
         for index in range(1, len(points))
     ]
 
-    payload = {
+    payload: dict[str, Any] = {
         "vehicles": [vehicle],
-        "jobs": jobs
+        "jobs": jobs,
     }
 
     with tempfile.TemporaryDirectory(prefix="vroom_") as directory:
-        input_path = Path(directory) / "input.json"
+        input_path: Path = Path(directory) / "input.json"
         input_path.write_text(
-            json.dumps(payload),
-            encoding="utf-8"
+            json.dumps(payload, allow_nan=False),
+            encoding="utf-8",
         )
 
-        command = [
+        command: list[str] = [
             VROOM_BIN,
             "-i", str(input_path),
             "-r", "osrm",
             "-a", f"car:{OSRM_HOST}",
             "-p", f"car:{OSRM_PORT}",
+            "-g",  # Required for route distance and geometry.
             "-l", "30",
-            "-t", "2"
+            "-t", "2",
         ]
 
-        process = None
+        process: asyncio.subprocess.Process | None = None
 
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
             )
 
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(),
-                timeout=90
+                timeout=90,
             )
 
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             if process is not None:
-                process.kill()
+                if process.returncode is None:
+                    process.kill()
                 await process.communicate()
 
             raise HTTPException(
                 status_code=504,
-                detail="VROOM optimization timed out"
-            )
+                detail="VROOM optimization timed out",
+            ) from exc
+
+        except asyncio.CancelledError:
+            if process is not None:
+                if process.returncode is None:
+                    process.kill()
+                await process.communicate()
+            raise
 
         except OSError as exc:
             raise HTTPException(
                 status_code=503,
-                detail="VROOM executable unavailable"
+                detail="VROOM executable unavailable",
             ) from exc
 
     if process.returncode != 0:
         raise HTTPException(
             status_code=502,
             detail=(
-                "VROOM execution failed: " +
-                stderr.decode("utf-8", errors="replace")[:500]
-            )
+                "VROOM execution failed: "
+                + stderr.decode("utf-8", errors="replace")[:500]
+            ),
         )
 
     try:
-        result = json.loads(stdout)
-    except json.JSONDecodeError as exc:
+        result: Any = json.loads(stdout)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(
             status_code=502,
-            detail="VROOM returned invalid JSON"
+            detail="VROOM returned invalid JSON",
         ) from exc
+
+    if not isinstance(result, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="VROOM returned an invalid response structure",
+        )
 
     if result.get("code") != 0:
         raise HTTPException(
             status_code=422,
-            detail=str(
-                result.get("error", "Optimization failed")
-            )
+            detail=str(result.get("error", "Optimization failed")),
         )
 
     if result.get("unassigned"):
         raise HTTPException(
             status_code=422,
-            detail="Some destinations could not be assigned"
+            detail="Some destinations could not be assigned",
         )
 
-    routes = result.get("routes", [])
+    routes: Any = result.get("routes")
 
-    if len(routes) != 1:
+    if (
+        not isinstance(routes, list)
+        or len(routes) != 1
+        or not isinstance(routes[0], dict)
+    ):
         raise HTTPException(
             status_code=502,
-            detail="Expected one vehicle route"
+            detail="Expected one vehicle route",
         )
 
-    route = routes[0]
+    route: dict[str, Any] = routes[0]
+    steps: Any = route.get("steps")
 
-    order = [0]
+    if not isinstance(steps, list):
+        raise HTTPException(
+            status_code=502,
+            detail="Missing route steps",
+        )
 
-    for step in route.get("steps", []):
+    order: list[int] = [0]
+
+    for step in steps:
+        if not isinstance(step, dict):
+            raise HTTPException(
+                status_code=502,
+                detail="Invalid route step",
+            )
+
         if step.get("type") == "job":
-            order.append(int(step["id"]))
+            job_id: Any = step.get("id")
+
+            if type(job_id) is not int:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Invalid job ID in optimized route",
+                )
+
+            order.append(job_id)
 
     if (
         len(order) != len(points)
@@ -186,20 +219,37 @@ async def optimize(
     ):
         raise HTTPException(
             status_code=502,
-            detail="Invalid optimized stop order"
+            detail="Invalid optimized stop order",
         )
 
-    distance = route.get("distance")
-    duration = route.get("duration")
+    distance_raw: Any = route.get("distance")
+    duration_raw: Any = route.get("duration")
 
-    if distance is None or duration is None:
+    if distance_raw is None:
         raise HTTPException(
             status_code=502,
-            detail="Missing distance or duration"
+            detail="VROOM response is missing route.distance; check the -g flag",
         )
 
-    distance = float(distance)
-    duration = float(duration)
+    if duration_raw is None:
+        raise HTTPException(
+            status_code=502,
+            detail="VROOM response is missing route.duration",
+        )
+
+    if (
+        isinstance(distance_raw, bool)
+        or isinstance(duration_raw, bool)
+        or not isinstance(distance_raw, (int, float))
+        or not isinstance(duration_raw, (int, float))
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="VROOM returned nonnumeric route metrics",
+        )
+
+    distance: float = float(distance_raw)
+    duration: float = float(duration_raw)
 
     if (
         not math.isfinite(distance)
@@ -209,11 +259,11 @@ async def optimize(
     ):
         raise HTTPException(
             status_code=502,
-            detail="Invalid route metrics"
+            detail="VROOM returned nonfinite or negative route metrics",
         )
 
-    return {
-        "order": order,
-        "distance_m": distance,
-        "duration_s": duration
-    }
+    return OptimizeResponse(
+        order=order,
+        distance_m=distance,
+        duration_s=duration,
+    )
