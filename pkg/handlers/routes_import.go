@@ -927,6 +927,8 @@ func ParseRouteScreenshots(c *gin.Context) {
 }
 
 func VerifyRouteAddress(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+
 	c.Request.Body = http.MaxBytesReader(
 		c.Writer,
 		c.Request.Body,
@@ -934,6 +936,7 @@ func VerifyRouteAddress(c *gin.Context) {
 	)
 
 	var input struct {
+		Action  string             `json:"action"`
 		Service ParsedRouteService `json:"service"`
 		Address string             `json:"address"`
 		Confirm *RouteConfirmation `json:"confirm"`
@@ -946,6 +949,25 @@ func VerifyRouteAddress(c *gin.Context) {
 		return
 	}
 
+	switch input.Action {
+	case "", "verify", "ai_assist":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Unsupported address action",
+		})
+		return
+	}
+
+	if input.Action == "ai_assist" && input.Confirm != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "AI assistance and pin confirmation are separate actions",
+		})
+		return
+	}
+
+	if input.Service.OriginalAddress == "" {
+		input.Service.OriginalAddress = input.Service.Address
+	}
 	if input.Service.OriginalAddress == "" {
 		input.Service.OriginalAddress = input.Address
 	}
@@ -965,9 +987,36 @@ func VerifyRouteAddress(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(
 		c.Request.Context(),
-		90*time.Second,
+		120*time.Second,
 	)
 	defer cancel()
+
+	if input.Action == "ai_assist" {
+		requestID := newAssistanceRequestID(input.Service.ID)
+		c.Header("X-Route-Assistance-ID", requestID)
+
+		result, err := assistRouteService(
+			ctx,
+			input.Service,
+			requestID,
+		)
+		if err != nil {
+			status := http.StatusBadGateway
+
+			if errors.Is(err, context.DeadlineExceeded) {
+				status = http.StatusGatewayTimeout
+			}
+
+			c.JSON(status, gin.H{
+				"error":      err.Error(),
+				"request_id": requestID,
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, result)
+		return
+	}
 
 	result := reviewRouteService(
 		ctx,

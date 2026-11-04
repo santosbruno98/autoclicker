@@ -9,45 +9,7 @@ import { API } from '../services/http';
 import { usePlanner } from '../services/plannerStore';
 import RouteLocationPicker from './RouteLocationPicker';
 
-const errorMessage = (error) =>
-  error?.response?.data?.error ||
-  error?.message ||
-  'Request failed';
-
-const correctionKey = (address) =>
-  String(address || '')
-    .normalize('NFKC')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, ' ');
-
-const coordinateKey = (point) =>
-  `${Number(point.latitude).toFixed(6)},` +
-  `${Number(point.longitude).toFixed(6)}`;
-
-function validPoint(point) {
-  const latitude = point?.latitude;
-  const longitude = point?.longitude;
-
-  if (
-    latitude == null ||
-    longitude == null ||
-    String(latitude).trim() === '' ||
-    String(longitude).trim() === ''
-  ) {
-    return false;
-  }
-
-  return (
-    Number.isFinite(Number(latitude)) &&
-    Number.isFinite(Number(longitude)) &&
-    Math.abs(Number(latitude)) <= 90 &&
-    Math.abs(Number(longitude)) <= 180 &&
-    !(Number(latitude) === 0 && Number(longitude) === 0)
-  );
-}
-
-function originalAddress(service) {
+function addressOf(service) {
   return String(
     service?.original_address ||
     service?.address ||
@@ -55,12 +17,54 @@ function originalAddress(service) {
   ).trim();
 }
 
-function resolutionProblems(service) {
-  const resolution = service?.resolution;
+function validPoint(point) {
+  if (
+    point?.latitude == null ||
+    point?.longitude == null ||
+    String(point.latitude).trim() === '' ||
+    String(point.longitude).trim() === ''
+  ) {
+    return false;
+  }
 
-  // Missing audit data must not be presented as AI resolution.
-  // Existing exact-geocoder and user-confirmed results can still
-  // follow their existing validation path.
+  const latitude = Number(point.latitude);
+  const longitude = Number(point.longitude);
+
+  return (
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    Math.abs(latitude) <= 90 &&
+    Math.abs(longitude) <= 180 &&
+    !(latitude === 0 && longitude === 0)
+  );
+}
+
+function coordinateKey(point) {
+  return (
+    `${Number(point.latitude).toFixed(6)},` +
+    `${Number(point.longitude).toFixed(6)}`
+  );
+}
+
+function correctionKey(address) {
+  return String(address || '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function errorMessage(error) {
+  return (
+    error?.response?.data?.error ||
+    error?.message ||
+    'Request failed'
+  );
+}
+
+function aiSelectionProblems(service) {
+  const resolution = service.resolution;
+
   if (resolution?.method !== 'ai_candidate') {
     return [];
   }
@@ -69,7 +73,7 @@ function resolutionProblems(service) {
 
   if (resolution.decision !== 'selected') {
     problems.push(
-      'AI did not report an unambiguous candidate selection.'
+      'AI did not establish an unambiguous candidate.'
     );
   }
 
@@ -78,26 +82,30 @@ function resolutionProblems(service) {
       candidate.id === resolution.selected_candidate_id
   );
 
-  if (!resolution.selected_candidate_id || matches.length !== 1) {
+  if (
+    !resolution.selected_candidate_id ||
+    matches.length !== 1
+  ) {
     problems.push(
-      'The AI selection does not identify exactly one returned candidate.'
+      'AI selection does not identify one returned candidate.'
     );
   } else {
     const candidate = matches[0];
 
-    if (!validPoint(candidate)) {
-      problems.push('The selected candidate has invalid coordinates.');
+    if (!validPoint(candidate) || !validPoint(service)) {
+      problems.push('Resolved coordinates are invalid.');
     } else if (
-      !validPoint(service) ||
       Math.abs(
-        Number(service.latitude) - Number(candidate.latitude)
+        Number(candidate.latitude) -
+        Number(service.latitude)
       ) > 0.0000001 ||
       Math.abs(
-        Number(service.longitude) - Number(candidate.longitude)
+        Number(candidate.longitude) -
+        Number(service.longitude)
       ) > 0.0000001
     ) {
       problems.push(
-        'The resolved coordinates differ from the selected candidate.'
+        'Resolved coordinates differ from the selected candidate.'
       );
     }
   }
@@ -106,11 +114,9 @@ function resolutionProblems(service) {
 }
 
 function normalizeService(service, index = 0) {
-  const original = originalAddress(service);
+  const original = addressOf(service);
 
-  // Recover only a postcode literally present in the original text.
-  // Never use a model-generated postcode as an invisible fallback.
-  const visiblePostcodes = [
+  const postcodes = [
     ...new Set(original.match(/\b\d{4}-\d{3}\b/g) || []),
   ];
 
@@ -121,7 +127,7 @@ function normalizeService(service, index = 0) {
     address: service.address || original,
     postal_code:
       service.postal_code ||
-      (visiblePostcodes.length === 1 ? visiblePostcodes[0] : ''),
+      (postcodes.length === 1 ? postcodes[0] : ''),
     candidates: Array.isArray(service.candidates)
       ? service.candidates
       : [],
@@ -131,9 +137,12 @@ function normalizeService(service, index = 0) {
     ),
   };
 
-  const problems = resolutionProblems(normalized);
+  const problems = aiSelectionProblems(normalized);
 
-  if (problems.length) {
+  if (
+    normalized.status !== 'excluded' &&
+    problems.length > 0
+  ) {
     normalized.status = 'needs_attention';
     normalized.reason = problems.join(' ');
   }
@@ -146,18 +155,22 @@ function servicesOf(state) {
     return state.services.map(normalizeService);
   }
 
-  // Previous "complete" flags are not enough to establish that the
-  // newer address and road checks were performed.
   return [
     ...(state?.complete || []),
     ...(state?.incomplete || []),
-  ].map((service, index) => normalizeService({
-    ...service,
-    stage: 'extracted',
-    status: 'needs_attention',
-    reason:
-      'Saved under the previous validation policy. Retry this address.',
-  }, index));
+  ].map((service, index) =>
+    normalizeService(
+      {
+        ...service,
+        stage: 'extracted',
+        status: 'needs_attention',
+        reason:
+          'Saved under the previous validation policy. ' +
+          'Request AI assistance or retry verification.',
+      },
+      index
+    )
+  );
 }
 
 function readyToRoute(service) {
@@ -169,7 +182,7 @@ function readyToRoute(service) {
       latitude: service.road_latitude,
       longitude: service.road_longitude,
     }) &&
-    resolutionProblems(service).length === 0
+    aiSelectionProblems(service).length === 0
   );
 }
 
@@ -199,7 +212,7 @@ function destinationsOf(services) {
 
     if (!grouped.has(key)) {
       grouped.set(key, {
-        address: originalAddress(service),
+        address: addressOf(service),
         latitude: Number(service.latitude),
         longitude: Number(service.longitude),
         services: [],
@@ -209,41 +222,54 @@ function destinationsOf(services) {
     grouped.get(key).services.push({
       id: service.id,
       service_type: service.service_type || 'unknown',
-      parcel_count: service.parcel_count || 1,
+      parcel_count: service.parcel_count,
     });
   }
 
   return [...grouped.values()];
 }
 
+function batchSignature(services) {
+  return JSON.stringify(
+    services.map((service) => [
+      service.id,
+      addressOf(service),
+    ])
+  );
+}
+
+function searchURL(query) {
+  return (
+    'https://www.google.com/maps/search/?' +
+    new URLSearchParams({
+      api: '1',
+      query,
+    }).toString()
+  );
+}
+
 function AddressMapsActions({ service }) {
-  const address = originalAddress(service);
+  const address = addressOf(service);
 
-  const searchURL = address
-    ? 'https://www.google.com/maps/search/?' +
-      new URLSearchParams({
-        api: '1',
-        query: address,
-      }).toString()
-    : null;
-
-  const directionsURL = readyToRoute(service)
-    ? 'https://www.google.com/maps/dir/?' +
-      new URLSearchParams({
-        api: '1',
-        destination:
-          `${Number(service.latitude)},` +
-          `${Number(service.longitude)}`,
-        travelmode: 'driving',
-      }).toString()
+  const directions = readyToRoute(service)
+    ? (
+        'https://www.google.com/maps/dir/?' +
+        new URLSearchParams({
+          api: '1',
+          destination:
+            `${Number(service.latitude)},` +
+            `${Number(service.longitude)}`,
+          travelmode: 'driving',
+        }).toString()
+      )
     : null;
 
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2">
-        {directionsURL && (
+        {directions && (
           <a
-            href={directionsURL}
+            href={directions}
             target="_blank"
             rel="noopener noreferrer"
             className="terminal-button inline-flex"
@@ -252,22 +278,22 @@ function AddressMapsActions({ service }) {
           </a>
         )}
 
-        {searchURL && (
+        {address && (
           <a
-            href={searchURL}
+            href={searchURL(address)}
             target="_blank"
             rel="noopener noreferrer"
             className="terminal-button-secondary inline-flex"
           >
-            Search address in Google Maps
+            Search in Google Maps
           </a>
         )}
       </div>
 
-      {!directionsURL && searchURL && (
+      {!directions && address && (
         <p className="text-xs text-amber-200">
-          Opens an address search. The planner has not verified
-          this destination.
+          Google Maps will search the address.
+          The planner has not verified this destination.
         </p>
       )}
     </div>
@@ -276,47 +302,25 @@ function AddressMapsActions({ service }) {
 
 function ResolutionDetails({ service }) {
   const resolution = service.resolution;
-  const problems = resolutionProblems(service);
+  const assistance = service.last_ai_assistance;
 
   return (
     <details className="rounded-lg border border-white/10 p-3">
       <summary className="cursor-pointer">
-        Address resolution details
+        Address and AI details
       </summary>
 
-      <div className="mt-3 space-y-3 text-sm">
-        <dl className="space-y-1">
-          <div>
-            <dt className="inline text-slate-400">Original: </dt>
-            <dd className="inline">{originalAddress(service)}</dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">Street: </dt>
-            <dd className="inline">{service.street || 'Missing'}</dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">House number: </dt>
-            <dd className="inline">
-              {service.house_number || 'Not established'}
-            </dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">Postcode: </dt>
-            <dd className="inline">
-              {service.postal_code || 'Missing'}
-            </dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">Locality: </dt>
-            <dd className="inline">{service.locality || 'Missing'}</dd>
-          </div>
-          <div>
-            <dt className="inline text-slate-400">Matched address: </dt>
-            <dd className="inline">
-              {service.matched_address || 'Not established'}
-            </dd>
-          </div>
-        </dl>
+      <div className="mt-3 space-y-2 text-sm">
+        <p>Original: {addressOf(service)}</p>
+        <p>Street: {service.street || 'Missing'}</p>
+        <p>
+          House number: {service.house_number || 'Not established'}
+        </p>
+        <p>Postcode: {service.postal_code || 'Missing'}</p>
+        <p>Locality: {service.locality || 'Missing'}</p>
+        <p>
+          Matched: {service.matched_address || 'Not established'}
+        </p>
 
         {resolution ? (
           <>
@@ -327,66 +331,82 @@ function ResolutionDetails({ service }) {
               <p>Model: {resolution.model}</p>
             )}
 
-            {resolution.selected_candidate_id && (
-              <p className="break-all">
-                Selected candidate: {resolution.selected_candidate_id}
-              </p>
-            )}
-
             {resolution.reason && (
               <p>Explanation: {resolution.reason}</p>
             )}
 
-            {resolution.normalized_address && (
-              <p>Normalized query: {resolution.normalized_address}</p>
+            {resolution.selected_candidate_id && (
+              <p className="break-all">
+                Candidate: {resolution.selected_candidate_id}
+              </p>
             )}
 
-            {Array.isArray(resolution.search_queries) &&
-              resolution.search_queries.length > 0 && (
-                <div>
-                  <p className="font-semibold">Queries used</p>
-                  <ul className="list-inside list-disc">
-                    {resolution.search_queries.map((query, index) => (
-                      <li key={index}>{query}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+            {resolution.road_checked_at && (
+              <p>
+                Road checked:{' '}
+                {new Date(
+                  resolution.road_checked_at
+                ).toLocaleString()}
+              </p>
+            )}
 
-            {Array.isArray(resolution.field_sources) &&
-              resolution.field_sources.length > 0 && (
-                <div>
-                  <p className="font-semibold">Field evidence</p>
-                  <ul className="space-y-2">
-                    {resolution.field_sources.map((entry, index) => (
+            {resolution.search_queries?.length > 0 && (
+              <div>
+                <p className="font-semibold">Queries attempted</p>
+                <ul className="list-inside list-disc">
+                  {resolution.search_queries.map(
+                    (query, index) => (
+                      <li key={index}>{query}</li>
+                    )
+                  )}
+                </ul>
+              </div>
+            )}
+
+            {resolution.field_sources?.length > 0 && (
+              <div>
+                <p className="font-semibold">Field evidence</p>
+                <ul className="space-y-2">
+                  {resolution.field_sources.map(
+                    (entry, index) => (
                       <li key={index}>
                         {entry.field}: {entry.value}
                         {' · '}
                         {entry.source}
-                        {entry.evidence ? ` · ${entry.evidence}` : ''}
+                        {entry.evidence
+                          ? ` · ${entry.evidence}`
+                          : ''}
                       </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+                    )
+                  )}
+                </ul>
+              </div>
+            )}
           </>
         ) : (
           <p className="text-amber-200">
-            The backend supplied no AI-resolution audit.
-            This page cannot establish that candidate comparison
-            was performed by Gemini.
+            No resolution audit was supplied by the backend.
           </p>
         )}
 
-        {problems.map((problem) => (
-          <p key={problem} className="text-red-300">
-            {problem}
-          </p>
-        ))}
+        {assistance && (
+          <div className="space-y-1">
+            <p>
+              Last assistance:{' '}
+              {new Date(
+                assistance.completed_at
+              ).toLocaleString()}
+            </p>
+            <p className="break-all">
+              Request: {assistance.request_id}
+            </p>
+          </div>
+        )}
 
         {validPoint(service) && (
           <p className="break-all font-mono text-xs">
-            Original point: {service.latitude}, {service.longitude}
+            Original coordinates:{' '}
+            {service.latitude}, {service.longitude}
           </p>
         )}
 
@@ -395,11 +415,11 @@ function ResolutionDetails({ service }) {
           longitude: service.road_longitude,
         }) && (
           <p className="break-all font-mono text-xs">
-            Road point: {service.road_latitude},{' '}
-            {service.road_longitude}
+            Road coordinates:{' '}
+            {service.road_latitude}, {service.road_longitude}
             {' · '}
-            {Math.round(Number(service.snap_distance_m) || 0)} m
-            from original
+            {Math.round(Number(service.snap_distance_m) || 0)}
+            {' '}m from original
           </p>
         )}
       </div>
@@ -415,12 +435,27 @@ export default function RoutePlannerTab() {
   const [error, setError] = useState('');
   const [picker, setPicker] = useState(null);
 
+  const [selectedServiceIDs, setSelectedServiceIDs] = useState([]);
+  const [runningAIID, setRunningAIID] = useState(null);
+  const [aiMessages, setAIMessages] = useState({});
+  const [aiSummary, setAISummary] = useState('');
+
   const busy = useRef(false);
 
   const state = view.record?.state;
   const canConnect = online && !identity.localOnly;
 
-  const services = useMemo(() => servicesOf(state), [state]);
+  const services = useMemo(
+    () => servicesOf(state),
+    [state]
+  );
+
+  const signature = batchSignature(services);
+
+  const destinations = useMemo(
+    () => destinationsOf(services),
+    [services]
+  );
 
   const readyServices = services.filter(readyToRoute);
 
@@ -434,12 +469,7 @@ export default function RoutePlannerTab() {
     (service) => service.status === 'excluded'
   );
 
-  const destinations = useMemo(
-    () => destinationsOf(services),
-    [services]
-  );
-
-  const selected = state?.plans?.find(
+  const selectedJourney = state?.plans?.find(
     (plan) => plan.id === state.selectedId
   );
 
@@ -454,6 +484,16 @@ export default function RoutePlannerTab() {
       window.removeEventListener('offline', update);
     };
   }, []);
+
+  useEffect(() => {
+    const available = new Set(
+      services.map((service) => service.id)
+    );
+
+    setSelectedServiceIDs((previous) =>
+      previous.filter((id) => available.has(id))
+    );
+  }, [signature]);
 
   async function perform(label, action) {
     if (busy.current) return;
@@ -479,12 +519,13 @@ export default function RoutePlannerTab() {
             error: message,
           }));
         } catch {
-          // The persistence layer displays its own failures.
+          // The persistence layer displays storage failures.
         }
       }
     } finally {
       busy.current = false;
       setWorking('');
+      setRunningAIID(null);
     }
   }
 
@@ -512,16 +553,16 @@ export default function RoutePlannerTab() {
     const { data } = await API.post(
       '/routes/verify-address',
       {
+        action: 'verify',
         service: normalizeService(service),
         ...(confirmation ? { confirm: confirmation } : {}),
       },
-      { timeout: 55000 }
+      { timeout: 130000 }
     );
 
     if (!data?.service?.id) {
       throw new Error(
-        'Backend returned an invalid review response. ' +
-        'The updated address-review endpoint is required.'
+        'Updated address-review backend is required.'
       );
     }
 
@@ -536,6 +577,172 @@ export default function RoutePlannerTab() {
     await replaceService(
       await reviewService(service, confirmation)
     );
+  }
+
+  function toggleService(id) {
+    setSelectedServiceIDs((previous) =>
+      previous.includes(id)
+        ? previous.filter((value) => value !== id)
+        : [...previous, id]
+    );
+  }
+
+  function setAIMessage(id, message) {
+    setAIMessages((previous) => ({
+      ...previous,
+      [id]: message,
+    }));
+  }
+
+  async function askAI(ids) {
+    await perform('AI address assistance', async () => {
+      if (!canConnect) {
+        throw new Error(
+          'Reconnect and sign in to request AI assistance.'
+        );
+      }
+
+      const initialServices = servicesOf(
+        store.getSnapshot().record.state
+      );
+
+      const expectedSignature = batchSignature(initialServices);
+
+      const requested = initialServices.filter(
+        (service) =>
+          ids.includes(service.id) &&
+          service.status !== 'excluded'
+      );
+
+      if (!requested.length) {
+        throw new Error(
+          'Select at least one non-excluded address.'
+        );
+      }
+
+      setAISummary('');
+
+      let resolvedCount = 0;
+      let unresolvedCount = 0;
+      let failedCount = 0;
+
+      for (const requestedService of requested) {
+        const currentServices = servicesOf(
+          store.getSnapshot().record.state
+        );
+
+        if (
+          batchSignature(currentServices) !== expectedSignature
+        ) {
+          throw new Error(
+            'The screenshot batch changed. Remaining requests stopped.'
+          );
+        }
+
+        const service = currentServices.find(
+          (item) => item.id === requestedService.id
+        );
+
+        if (!service) continue;
+
+        setRunningAIID(service.id);
+        setAIMessage(
+          service.id,
+          'Requesting a fresh AI parse, candidate search and road check…'
+        );
+
+        try {
+          const { data } = await API.post(
+            '/routes/verify-address',
+            {
+              action: 'ai_assist',
+              service,
+            },
+            { timeout: 130000 }
+          );
+
+          if (
+            data.ai_attempted !== true ||
+            !data.service ||
+            !data.request_id
+          ) {
+            throw new Error(
+              'Backend did not confirm AI assistance. ' +
+              'Deploy the updated ai_assist handler.'
+            );
+          }
+
+          const result = normalizeService({
+            ...data.service,
+            id: service.id,
+            last_ai_assistance: {
+              request_id: data.request_id,
+              completed_at: new Date().toISOString(),
+            },
+          });
+
+          await store.change((current) => {
+            const latest = servicesOf(current);
+
+            if (
+              batchSignature(latest) !== expectedSignature
+            ) {
+              throw new Error(
+                'The batch changed. AI results were not applied.'
+              );
+            }
+
+            return {
+              ...withServices(
+                current,
+                latest.map((item) =>
+                  item.id === service.id ? result : item
+                )
+              ),
+              error: '',
+            };
+          });
+
+          if (readyToRoute(result)) {
+            resolvedCount++;
+            setAIMessage(
+              service.id,
+              'AI review completed. Address and road checks passed.'
+            );
+          } else {
+            unresolvedCount++;
+            setAIMessage(
+              service.id,
+              'AI review completed; still needs attention: ' +
+              (
+                result.reason ||
+                result.resolution?.reason ||
+                'No supported destination was established.'
+              )
+            );
+          }
+        } catch (failure) {
+          failedCount++;
+
+          setAIMessage(
+            service.id,
+            errorMessage(failure)
+          );
+
+          if (failure.response?.status === 401) {
+            throw failure;
+          }
+        }
+      }
+
+      setRunningAIID(null);
+
+      setAISummary(
+        `${resolvedCount} ready · ` +
+        `${unresolvedCount} still need attention · ` +
+        `${failedCount} requests failed`
+      );
+    });
   }
 
   async function confirmService(service, point) {
@@ -567,7 +774,8 @@ export default function RoutePlannerTab() {
                 resolution: {
                   method: 'user_pin',
                   decision: 'selected',
-                  reason: 'Location explicitly selected by the user',
+                  reason:
+                    'Location explicitly selected by the user',
                 },
               }
             : item
@@ -575,10 +783,10 @@ export default function RoutePlannerTab() {
       ),
       corrections: {
         ...(current.corrections || {}),
-        [correctionKey(originalAddress(service))]: {
+        [correctionKey(addressOf(service))]: {
           ...confirmation,
-          confirmed_at: new Date().toISOString(),
           source: 'user',
+          confirmed_at: new Date().toISOString(),
         },
       },
     }));
@@ -594,14 +802,7 @@ export default function RoutePlannerTab() {
         confirmation
       );
 
-      await replaceService({
-        ...reviewed,
-        resolution: {
-          method: 'user_pin',
-          decision: 'selected',
-          reason: 'Location explicitly selected by the user',
-        },
-      });
+      await replaceService(reviewed);
     }
   }
 
@@ -688,8 +889,7 @@ export default function RoutePlannerTab() {
       !allowPartial
     ) {
       throw new Error(
-        'Review outstanding services or explicitly generate ' +
-        'routes for the remaining destinations.'
+        'Resolve the remaining services or explicitly generate a partial journey.'
       );
     }
 
@@ -707,7 +907,7 @@ export default function RoutePlannerTab() {
 
     if (!ready.length) {
       throw new Error(
-        'There are no ready destinations beyond the starting point.'
+        'No ready destinations beyond the starting point.'
       );
     }
 
@@ -720,8 +920,8 @@ export default function RoutePlannerTab() {
     await store.change((value) => ({
       ...value,
       selectedId: null,
-      error: '',
       originError: '',
+      error: '',
       phase: 'optimizing',
     }));
 
@@ -744,7 +944,9 @@ export default function RoutePlannerTab() {
       );
 
       if (!plan?.id || !plan.segments?.length) {
-        throw new Error('Backend returned no route links.');
+        throw new Error(
+          'Backend returned no route links.'
+        );
       }
 
       await store.change((value) => ({
@@ -837,11 +1039,14 @@ export default function RoutePlannerTab() {
 
         if (!Array.isArray(data.services)) {
           throw new Error(
-            'The updated backend extraction response is required.'
+            'The updated structured extraction backend is required.'
           );
         }
 
-        // Persist extraction before attempting saved corrections.
+        setSelectedServiceIDs([]);
+        setAIMessages({});
+        setAISummary('');
+
         await store.change((current) => ({
           ...withServices(current, data.services),
           screenshotCount: files.length,
@@ -849,12 +1054,12 @@ export default function RoutePlannerTab() {
           error: '',
         }));
 
-        const current = store.getSnapshot().record.state;
-        const corrections = current.corrections || {};
+        const extractedState = store.getSnapshot().record.state;
+        const corrections = extractedState.corrections || {};
 
-        for (const service of servicesOf(current)) {
+        for (const service of servicesOf(extractedState)) {
           const correction =
-            corrections[correctionKey(originalAddress(service))];
+            corrections[correctionKey(addressOf(service))];
 
           if (!correction) continue;
 
@@ -867,14 +1072,7 @@ export default function RoutePlannerTab() {
               correction
             );
 
-            await replaceService({
-              ...reviewed,
-              resolution: {
-                method: 'user_pin',
-                decision: 'selected',
-                reason: 'Previously confirmed location reused',
-              },
-            });
+            await replaceService(reviewed);
           } catch {
             await replaceService({
               ...service,
@@ -921,7 +1119,7 @@ export default function RoutePlannerTab() {
 
     if (validPoint(state?.origin)) return state.origin;
 
-    // Initial viewport only. It is never accepted automatically.
+    // Initial viewport only; never accepted automatically.
     return {
       latitude: 40.537,
       longitude: -7.268,
@@ -929,9 +1127,12 @@ export default function RoutePlannerTab() {
   }
 
   async function startNew() {
-    // The supplied planner store retains confirmed corrections.
     await store.startNew();
+
     setPicker(null);
+    setSelectedServiceIDs([]);
+    setAIMessages({});
+    setAISummary('');
   }
 
   if (view.phase === 'loading') {
@@ -997,6 +1198,14 @@ export default function RoutePlannerTab() {
     return readyToRoute(service);
   });
 
+  const selectableIDs = selectedServiceIDs.filter(
+    (id) => services.some(
+      (service) =>
+        service.id === id &&
+        service.status !== 'excluded'
+    )
+  );
+
   const tabs = [
     ['complete', `Ready to route (${readyServices.length})`],
     ['incomplete', `Needs attention (${attention.length})`],
@@ -1030,8 +1239,8 @@ export default function RoutePlannerTab() {
       {!canConnect && (
         <div className="terminal-card p-4 text-amber-200">
           Saved local journey. Addresses and route links remain
-          available. Corrections are saved on this device.
-          Verification and new routes require connectivity and sign-in.
+          available. New verification, AI assistance and route
+          generation require connectivity and sign-in.
         </div>
       )}
 
@@ -1064,9 +1273,7 @@ export default function RoutePlannerTab() {
       )}
 
       <section className="terminal-card space-y-3 p-4">
-        <h3 className="font-semibold">
-          Starting location
-        </h3>
+        <h3 className="font-semibold">Starting location</h3>
 
         {state.origin ? (
           <div className="break-all font-mono text-sm">
@@ -1132,7 +1339,7 @@ export default function RoutePlannerTab() {
           title={
             picker.origin
               ? 'Choose starting location'
-              : originalAddress(picker.service)
+              : addressOf(picker.service)
           }
           initial={picker.initial}
           onCancel={() => setPicker(null)}
@@ -1205,7 +1412,11 @@ export default function RoutePlannerTab() {
         </div>
       )}
 
-      <section className="terminal-card space-y-3 p-4">
+      <section className="terminal-card space-y-4 p-4">
+        <h3 className="font-semibold">
+          Addresses and AI assistance
+        </h3>
+
         <div className="flex flex-wrap gap-2">
           {tabs.map(([tab, label]) => (
             <button
@@ -1229,6 +1440,58 @@ export default function RoutePlannerTab() {
           ))}
         </div>
 
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="terminal-button-secondary"
+            disabled={Boolean(working)}
+            onClick={() => setSelectedServiceIDs(
+              (previous) => [
+                ...new Set([
+                  ...previous,
+                  ...shownServices
+                    .filter(
+                      (service) => service.status !== 'excluded'
+                    )
+                    .map((service) => service.id),
+                ]),
+              ]
+            )}
+          >
+            Select visible addresses
+          </button>
+
+          <button
+            className="terminal-button-secondary"
+            disabled={Boolean(working)}
+            onClick={() => setSelectedServiceIDs([])}
+          >
+            Clear selection
+          </button>
+
+          <button
+            className="terminal-button"
+            disabled={
+              Boolean(working) ||
+              !canConnect ||
+              selectableIDs.length === 0
+            }
+            onClick={() => askAI(selectableIDs)}
+          >
+            Ask AI about selected ({selectableIDs.length})
+          </button>
+        </div>
+
+        <p className="text-sm text-slate-400">
+          Selection is retained when switching between lists.
+          AI assistance makes a fresh request for each selected address.
+        </p>
+
+        {aiSummary && (
+          <p role="status" className="text-cyan-200">
+            {aiSummary}
+          </p>
+        )}
+
         {!shownServices.length && (
           <p className="text-sm text-slate-400">
             No services in this list.
@@ -1238,11 +1501,24 @@ export default function RoutePlannerTab() {
         {shownServices.map((service) => (
           <article
             key={service.id}
-            className="space-y-3 rounded-xl border border-white/10 p-4"
+            className="space-y-3 rounded-xl border border-white/15 p-4"
           >
-            <p className="font-semibold">
-              {originalAddress(service) || 'Address obscured'}
-            </p>
+            <label className="flex items-start gap-3">
+              <input
+                type="checkbox"
+                checked={selectedServiceIDs.includes(service.id)}
+                disabled={
+                  Boolean(working) ||
+                  service.status === 'excluded'
+                }
+                onChange={() => toggleService(service.id)}
+                className="mt-1"
+              />
+
+              <span className="font-semibold">
+                {addressOf(service) || 'Address obscured'}
+              </span>
+            </label>
 
             <p className="text-sm text-slate-400">
               Stage: {service.stage || 'extracted'} ·{' '}
@@ -1253,6 +1529,26 @@ export default function RoutePlannerTab() {
             {service.reason && (
               <p className="text-amber-200">
                 {service.reason}
+              </p>
+            )}
+
+            <button
+              className="terminal-button"
+              disabled={
+                Boolean(working) ||
+                !canConnect ||
+                service.status === 'excluded'
+              }
+              onClick={() => askAI([service.id])}
+            >
+              {runningAIID === service.id
+                ? 'AI is reviewing this address…'
+                : 'Ask AI about this address'}
+            </button>
+
+            {aiMessages[service.id] && (
+              <p role="status" className="text-sm text-cyan-200">
+                {aiMessages[service.id]}
               </p>
             )}
 
@@ -1347,15 +1643,10 @@ export default function RoutePlannerTab() {
 
                         {validPoint(candidate) && (
                           <a
-                            href={
-                              'https://www.google.com/maps/search/?' +
-                              new URLSearchParams({
-                                api: '1',
-                                query:
-                                  `${candidate.latitude},` +
-                                  `${candidate.longitude}`,
-                              }).toString()
-                            }
+                            href={searchURL(
+                              `${candidate.latitude},` +
+                              `${candidate.longitude}`
+                            )}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="terminal-button-secondary inline-flex"
@@ -1387,20 +1678,24 @@ export default function RoutePlannerTab() {
         ))}
       </section>
 
-      {selected && (
+      {selectedJourney && (
         <section className="terminal-card space-y-4 p-4">
           <h3 className="font-semibold">
             Saved optimized journey
           </h3>
 
           <p>
-            {(Number(selected.distance_m) / 1000).toFixed(1)} km
-            {' · '}
-            {Math.round(Number(selected.duration_s) / 60)}
+            {(
+              Number(selectedJourney.distance_m) / 1000
+            ).toFixed(1)}
+            {' '}km ·{' '}
+            {Math.round(
+              Number(selectedJourney.duration_s) / 60
+            )}
             {' '}minutes driving
           </p>
 
-          {[...(selected.segments || [])]
+          {[...(selectedJourney.segments || [])]
             .sort((a, b) => a.sequence - b.sequence)
             .map((segment, index, list) => (
               <article
@@ -1421,7 +1716,7 @@ export default function RoutePlannerTab() {
                       () => store.change((current) => ({
                         ...current,
                         plans: current.plans.map((plan) =>
-                          plan.id !== selected.id
+                          plan.id !== selectedJourney.id
                             ? plan
                             : {
                                 ...plan,
@@ -1459,7 +1754,7 @@ export default function RoutePlannerTab() {
                   <summary>Destinations</summary>
 
                   <ol className="mt-2 space-y-2">
-                    {[...(selected.stops || [])]
+                    {[...(selectedJourney.stops || [])]
                       .sort((a, b) => a.sequence - b.sequence)
                       .filter((stop) =>
                         stop.sequence > segment.start_stop &&
@@ -1507,4 +1802,4 @@ export default function RoutePlannerTab() {
       )}
     </div>
   );
-}3
+}
