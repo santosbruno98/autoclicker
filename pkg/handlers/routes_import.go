@@ -3,7 +3,6 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,464 +10,347 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"autoclicker/pkg/database"
 	"autoclicker/pkg/models"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/text/unicode/norm"
 	"gorm.io/gorm"
 )
 
-type ParsedRouteService struct {
+const routeParserVersion = "structured-route-review-v2"
+
+var (
+	postalPattern     = regexp.MustCompile(`\b\d{4}-\d{3}\b`)
+	longNumberPattern = regexp.MustCompile(`\d{5,}`)
+	undefinedPattern  = regexp.MustCompile(`(?i)\b(undefined|null|nan)\b`)
+
+	routeGeminiClient = &http.Client{
+		Timeout: 60 * time.Second,
+	}
+
+	routeGeocodeClient = &http.Client{
+		Timeout: 15 * time.Second,
+	}
+)
+
+type RouteCandidate struct {
+	ID          string  `json:"id"`
 	Address     string  `json:"address"`
-	ServiceType string  `json:"service_type"`
+	Street      string  `json:"street"`
+	HouseNumber string  `json:"house_number"`
+	PostalCode  string  `json:"postal_code"`
+	Locality    string  `json:"locality"`
 	Latitude    float64 `json:"latitude"`
 	Longitude   float64 `json:"longitude"`
-	Status      string  `json:"status"`
-	Reason      string  `json:"reason"`
+	Confidence  float64 `json:"confidence"`
+	ResultType  string  `json:"result_type"`
+	MatchType   string  `json:"match_type"`
+	Exact       bool    `json:"exact"`
+	CanConfirm  bool    `json:"can_confirm"`
+}
+
+type RouteConfirmation struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
+type ParsedRouteService struct {
+	ID               string             `json:"id"`
+	SourceApp        string             `json:"source_app"`
+	SourceReference  string             `json:"source_reference"`
+	SourceImage      int                `json:"source_image"`
+	OriginalAddress  string             `json:"original_address"`
+	Address          string             `json:"address"`
+	Street           string             `json:"street"`
+	HouseNumber      string             `json:"house_number"`
+	PostalCode       string             `json:"postal_code"`
+	Locality         string             `json:"locality"`
+	ServiceType      string             `json:"service_type"`
+	ParcelCount      int                `json:"parcel_count"`
+	ExtractionIssues []string           `json:"extraction_issues"`
+	Candidates       []RouteCandidate   `json:"candidates"`
+	MatchedAddress   string             `json:"matched_address"`
+	Latitude         float64            `json:"latitude"`
+	Longitude        float64            `json:"longitude"`
+	RoadLatitude     float64            `json:"road_latitude"`
+	RoadLongitude    float64            `json:"road_longitude"`
+	SnapDistanceM    float64            `json:"snap_distance_m"`
+	Stage            string             `json:"stage"`
+	Status           string             `json:"status"`
+	Reason           string             `json:"reason"`
+	Confirmed        bool               `json:"confirmed"`
+	Confirmation     *RouteConfirmation `json:"confirmation,omitempty"`
+	Resolution       *RouteResolution   `json:"resolution,omitempty"`
 }
 
 type routeParseResult struct {
 	Services []ParsedRouteService `json:"services"`
 }
 
-type routeModelAttempt struct {
-	Model             string `json:"model"`
-	Stage             string `json:"stage"`
-	HTTPStatus        int    `json:"upstream_http_status,omitempty"`
-	UpstreamStatus    string `json:"upstream_status,omitempty"`
-	UpstreamRequestID string `json:"upstream_request_id,omitempty"`
-	FinishReason      string `json:"finish_reason,omitempty"`
-	Message           string `json:"message,omitempty"`
-	DurationMS        int64  `json:"duration_ms"`
+const routeExtractionPrompt = `
+Extract visible delivery/collection SERVICE CARDS from these logistics screenshots.
+
+Return JSON only:
+{
+  "services": [
+    {
+      "source_app": "gls|lds|unknown",
+      "source_reference": "visible shipment/service identifier or empty string",
+      "original_address": "all visible address text belonging to this card",
+      "street": "street name as visible, or empty string",
+      "house_number": "house number as visible, or empty string",
+      "postal_code": "Portuguese postal code as visible, or empty string",
+      "locality": "locality as visible, or empty string",
+      "service_type": "delivery|pickup|unknown",
+      "parcel_count": 1,
+      "extraction_issues": []
+    }
+  ]
 }
-
-type routeParseFailure struct {
-	HTTPStatus int
-	Code       string
-	Stage      string
-	Message    string
-	Attempts   []routeModelAttempt
-}
-
-func (e *routeParseFailure) Error() string {
-	return e.Message
-}
-
-const (
-	routeParserVersion = "gemini-fallback-diagnostics-v1"
-	routeAttemptTimeout = 60 * time.Second
-	routeResponseLimit  = 2 << 20
-)
-
-const routeExtractionPrompt = `Extract every visible delivery or collection service from this Portuguese logistics screenshot.
-
-Return JSON only, with this structure:
-{"services":[{"address":"string","service_type":"delivery|pickup|unknown"}]}
 
 Rules:
-- Each service card is one record, even when two cards have the same address.
-- D means delivery; P means pickup. If unclear, use unknown.
-- Reproduce the complete address using only visible information.
-- Do not invent or repair missing street names, numbers, postal codes or localities.
-- Preserve the word "undefined" when visible.
-- Ignore recipients, customer names, tracking numbers and shipment IDs.
-- Do not extract navigation buttons, menu text or parcel counts.
-- Do not merge duplicate service cards.
-- If an address is partially obscured, include only its visible text.`
-
-var routeGeminiClient = &http.Client{
-	Timeout: routeAttemptTimeout,
-}
-
-var postalPattern = regexp.MustCompile(`\b\d{4}-\d{3}\b`)
-var undefinedPattern = regexp.MustCompile(`(?i)\b(undefined|null|nan)\b`)
+- A service card is one record. Two parcels on a card are not two services.
+- Keep separate cards even when they share an address.
+- GLS: D or E means delivery. P or an explicit collection label means pickup.
+- LDS: associate the postal-code/locality heading with the street inside
+  THE SAME card, even when the heading is above the street.
+- Never take a heading from an adjacent card.
+- Reproduce original address text without inventing or repairing information.
+- Preserve suspicious/repeated house numbers in original_address.
+- Flag corrupted numbers, cropped fields, obscured text, or unclear card
+  association in extraction_issues.
+- Do not invent missing house numbers, streets, postal codes, or localities.
+- If no service identifier is visible, use an empty source_reference.
+- Do not extract recipients, telephone numbers, customer names, button text,
+  navigation text, or unrelated numbers.
+- Do not use a telephone number as a service identifier.
+- A delivery/collection status is separate from address completeness.
+`
 
 func routeHash(value []byte) string {
 	sum := sha256.Sum256(value)
 	return hex.EncodeToString(sum[:])
 }
 
-func normalizeRouteAddress(s string) string {
-	return strings.Join(
-		strings.Fields(strings.ToLower(strings.TrimSpace(s))),
-		" ",
-	)
+func normalizeRouteAddress(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
 }
 
-func validateRouteAddress(address string) string {
-	if undefinedPattern.MatchString(address) {
+// Used for comparing address components, not for rewriting displayed text.
+func addressWords(value string) string {
+	var builder strings.Builder
+
+	for _, character := range norm.NFD.String(strings.ToLower(value)) {
+		if unicode.Is(unicode.Mn, character) {
+			continue
+		}
+		if unicode.IsLetter(character) || unicode.IsDigit(character) {
+			builder.WriteRune(character)
+		} else {
+			builder.WriteByte(' ')
+		}
+	}
+
+	aliases := map[string]string{
+		"r":      "rua",
+		"av":     "avenida",
+		"n":      "",
+		"numero": "",
+		"grd":    "guarda",
+	}
+
+	words := strings.Fields(builder.String())
+	result := make([]string, 0, len(words))
+
+	for _, word := range words {
+		if replacement, exists := aliases[word]; exists {
+			word = replacement
+		}
+		if word != "" {
+			result = append(result, word)
+		}
+	}
+	return strings.Join(result, " ")
+}
+
+func containsAddressWords(expected, actual string) bool {
+	words := strings.Fields(addressWords(expected))
+	if len(words) == 0 {
+		return false
+	}
+
+	actualWords := make(map[string]bool)
+	for _, word := range strings.Fields(addressWords(actual)) {
+		actualWords[word] = true
+	}
+
+	for _, word := range words {
+		if !actualWords[word] {
+			return false
+		}
+	}
+	return true
+}
+
+func serviceAddress(service ParsedRouteService) string {
+	if service.OriginalAddress != "" {
+		return service.OriginalAddress
+	}
+	return service.Address
+}
+
+func extractionProblem(service ParsedRouteService) string {
+	original := serviceAddress(service)
+
+	if len(service.ExtractionIssues) > 0 {
+		return strings.Join(service.ExtractionIssues, "; ")
+	}
+	if undefinedPattern.MatchString(original) {
 		return "Address contains undefined fields"
 	}
-	if !postalPattern.MatchString(address) {
-		return "Missing Portuguese postal code"
-	}
 
-	match := postalPattern.FindStringIndex(address)
-	after := strings.TrimSpace(address[match[1]:])
-	after = strings.Trim(after, ", ")
-	after = strings.TrimSpace(
-		strings.TrimSuffix(
-			strings.TrimSuffix(after, "Portugal"),
-			"PORTUGAL",
-		),
-	)
-	after = strings.Trim(after, ", ")
-
-	if after == "" {
-		return "Missing locality"
+	withoutPostal := postalPattern.ReplaceAllString(original, "")
+	if longNumberPattern.MatchString(withoutPostal) {
+		return "Address contains a suspicious number; confirm its location"
 	}
-	if len([]rune(strings.TrimSpace(address[:match[0]]))) < 5 {
-		return "Missing street information"
+	if strings.TrimSpace(service.Street) == "" {
+		return "Street is missing or obscured"
 	}
-
+	if !postalPattern.MatchString(service.PostalCode) {
+		return "Portuguese postal code is missing or invalid"
+	}
+	if strings.TrimSpace(service.Locality) == "" {
+		return "Locality is missing"
+	}
 	return ""
 }
 
-func routeRequestID() string {
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err == nil {
-		return hex.EncodeToString(raw[:])
-	}
-	return fmt.Sprintf("route-%d", time.Now().UnixNano())
-}
-
-// Used for provider messages only. Never pass extracted addresses,
-// image contents, database errors, or geocoding URLs to this function.
-func safeRouteProviderMessage(message string) string {
-	for _, name := range []string{
-		"GEMINI_API_KEY",
-		"GEOAPIFY_API_KEY",
-	} {
-		if key := strings.TrimSpace(os.Getenv(name)); key != "" {
-			message = strings.ReplaceAll(message, key, "[REDACTED]")
-		}
+func normalizeExtractedService(
+	service ParsedRouteService,
+	imageHash string,
+	cardIndex int,
+) ParsedRouteService {
+	service.OriginalAddress = strings.TrimSpace(service.OriginalAddress)
+	if service.OriginalAddress == "" {
+		service.OriginalAddress = strings.TrimSpace(service.Address)
 	}
 
-	message = strings.Join(strings.Fields(message), " ")
-	runes := []rune(message)
-	if len(runes) > 1200 {
-		return string(runes[:1200]) + "..."
-	}
-	return message
-}
+	service.Address = service.OriginalAddress
+	service.Street = strings.TrimSpace(service.Street)
+	service.HouseNumber = strings.TrimSpace(service.HouseNumber)
+	service.PostalCode = strings.TrimSpace(service.PostalCode)
+	service.Locality = strings.TrimSpace(service.Locality)
+	service.SourceReference = strings.TrimSpace(service.SourceReference)
 
-func configuredRouteGeminiModels() []string {
-	defaults := []string{
-		"gemini-3.5-flash-lite",
-		"gemini-3.8-flash",
-		"gemini-3.6-flash",
-	}
-
-	var candidates []string
-
-	if value := strings.TrimSpace(
-		os.Getenv("ROUTE_GEMINI_MODELS"),
-	); value != "" {
-		candidates = strings.Split(value, ",")
-	} else {
-		if primary := strings.TrimSpace(
-			os.Getenv("ROUTE_GEMINI_MODEL"),
-		); primary != "" {
-			candidates = append(candidates, primary)
-		}
-		candidates = append(candidates, defaults...)
+	switch strings.ToLower(strings.TrimSpace(service.SourceApp)) {
+	case "gls":
+		service.SourceApp = "gls"
+	case "lds":
+		service.SourceApp = "lds"
+	default:
+		service.SourceApp = "unknown"
 	}
 
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(candidates))
+	switch strings.ToLower(strings.TrimSpace(service.ServiceType)) {
+	case "delivery", "d", "e":
+		service.ServiceType = "delivery"
+	case "pickup", "p":
+		service.ServiceType = "pickup"
+	default:
+		service.ServiceType = "unknown"
+	}
 
-	for _, candidate := range candidates {
-		model := strings.TrimPrefix(
-			strings.TrimSpace(candidate),
-			"models/",
+	if service.ParcelCount < 1 {
+		service.ParcelCount = 1
+	}
+
+	identity := service.SourceApp + ":" + service.SourceReference
+	if service.SourceReference == "" {
+		// No invented shipment identity. Preserve separate cards.
+		identity = fmt.Sprintf(
+			"%s:%d:%s",
+			imageHash,
+			cardIndex,
+			service.OriginalAddress,
 		)
-		if model == "" || seen[model] {
-			continue
-		}
-		seen[model] = true
-		result = append(result, model)
 	}
 
-	return result
+	service.ID = routeHash([]byte(identity))
+	service.Stage = "extracted"
+	service.Status = "needs_attention"
+	service.Reason = extractionProblem(service)
+	service.Candidates = []RouteCandidate{}
+
+	return service
 }
 
-func respondRouteFailure(
-	c *gin.Context,
-	requestID string,
-	started time.Time,
-	imageIndex int,
-	failure *routeParseFailure,
-) {
-	response := gin.H{
-		"error":          failure.Message,
-		"code":           failure.Code,
-		"stage":          failure.Stage,
-		"request_id":     requestID,
-		"parser_version": routeParserVersion,
-		"revision":       os.Getenv("K_REVISION"),
-		"duration_ms":    time.Since(started).Milliseconds(),
-	}
-
-	if imageIndex > 0 {
-		response["image_index"] = imageIndex
-	}
-	if failure.Stage == "gemini" || failure.Stage == "configuration" {
-		response["configured_models"] = configuredRouteGeminiModels()
-	}
-	if len(failure.Attempts) > 0 {
-		response["attempts"] = failure.Attempts
-	}
-
-	if encoded, err := json.Marshal(response); err == nil {
-		log.Printf("route_parse_failure %s", encoded)
-	}
-
-	c.JSON(failure.HTTPStatus, response)
-}
-
-func decodeRouteExtraction(text string) ([]ParsedRouteService, error) {
+func decodeRouteExtraction(
+	text string,
+	imageHash string,
+) ([]ParsedRouteService, error) {
 	var result struct {
 		Services *[]ParsedRouteService `json:"services"`
 	}
 
-	// Do not expose model-generated address text in decode errors.
-	if err := json.Unmarshal(
-		[]byte(strings.TrimSpace(text)),
-		&result,
-	); err != nil {
-		return nil, errors.New(
-			"Model output is not valid JSON matching the extraction structure",
-		)
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &result); err != nil {
+		return nil, errors.New("Gemini returned invalid extraction JSON")
 	}
 	if result.Services == nil {
-		return nil, errors.New(
-			"Model output is missing a non-null services array",
-		)
+		return nil, errors.New("Gemini response is missing the services array")
+	}
+	if len(*result.Services) > 500 {
+		return nil, errors.New("Too many extracted service cards")
 	}
 
-	services := *result.Services
-	for i := range services {
-		services[i].Address = strings.TrimSpace(services[i].Address)
-		if services[i].Address == "" {
-			return nil, fmt.Errorf(
-				"Model output contains an empty address at record %d",
-				i+1,
-			)
+	services := make([]ParsedRouteService, 0, len(*result.Services))
+	for index, service := range *result.Services {
+		service = normalizeExtractedService(service, imageHash, index)
+		if service.OriginalAddress == "" {
+			service.Reason = "Address is missing or obscured"
 		}
-		switch services[i].ServiceType {
-		case "delivery", "pickup":
-		default:
-			services[i].ServiceType = "unknown"
-		}
+		services = append(services, service)
 	}
 	return services, nil
 }
 
-func attemptRouteGemini(
-	ctx context.Context,
-	model string,
-	apiKey string,
-	body []byte,
-) (
-	services []ParsedRouteService,
-	attempt routeModelAttempt,
-	attemptErr error,
-) {
-	started := time.Now()
-	attempt.Model = model
-	attempt.Stage = "request"
-
-	defer func() {
-		attempt.DurationMS = time.Since(started).Milliseconds()
-	}()
-
-	fail := func(stage string, message string) {
-		attempt.Stage = stage
-		attempt.Message = safeRouteProviderMessage(message)
-		attemptErr = errors.New(attempt.Message)
+func configuredRouteGeminiModels() []string {
+	value := strings.TrimSpace(os.Getenv("ROUTE_GEMINI_MODELS"))
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv("ROUTE_GEMINI_MODEL")) +
+			",gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.6-flash"
 	}
 
-	attemptCtx, cancel := context.WithTimeout(ctx, routeAttemptTimeout)
-	defer cancel()
+	var result []string
+	seen := map[string]bool{}
 
-	endpoint := "https://generativelanguage.googleapis.com/v1beta/models/" +
-		url.PathEscape(model) + ":generateContent"
-
-	req, err := http.NewRequestWithContext(
-		attemptCtx,
-		http.MethodPost,
-		endpoint,
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		fail("request", "Cannot construct Gemini request")
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", apiKey)
-
-	resp, err := routeGeminiClient.Do(req)
-	if err != nil {
-		switch {
-		case ctx.Err() != nil:
-			fail("request_cancelled", ctx.Err().Error())
-		case errors.Is(err, context.DeadlineExceeded),
-			errors.Is(attemptCtx.Err(), context.DeadlineExceeded):
-			fail("timeout", "Gemini attempt exceeded its 60-second timeout")
-		default:
-			fail("network", err.Error())
-		}
-		return
-	}
-	defer resp.Body.Close()
-
-	attempt.HTTPStatus = resp.StatusCode
-	attempt.UpstreamRequestID = resp.Header.Get("X-Goog-Request-Id")
-	if attempt.UpstreamRequestID == "" {
-		attempt.UpstreamRequestID = resp.Header.Get("X-Request-Id")
-	}
-
-	raw, err := io.ReadAll(
-		io.LimitReader(resp.Body, routeResponseLimit+1),
-	)
-	if err != nil {
-		fail("response_read", "Failed to read the Gemini response")
-		return
-	}
-	if len(raw) > routeResponseLimit {
-		fail("response_read", "Gemini response exceeded the 2 MiB limit")
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var upstream struct {
-			Error struct {
-				Status  string `json:"status"`
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-
-		if err := json.Unmarshal(raw, &upstream); err == nil &&
-			upstream.Error.Message != "" {
-			attempt.UpstreamStatus = upstream.Error.Status
-			fail("upstream_http", upstream.Error.Message)
-		} else {
-			fail(
-				"upstream_http",
-				fmt.Sprintf(
-					"Gemini returned HTTP %d without a readable JSON error; content type: %s",
-					resp.StatusCode,
-					resp.Header.Get("Content-Type"),
-				),
-			)
-		}
-		return
-	}
-
-	var envelope struct {
-		PromptFeedback struct {
-			BlockReason string `json:"blockReason"`
-		} `json:"promptFeedback"`
-		Candidates []struct {
-			FinishReason string `json:"finishReason"`
-			Content      struct {
-				Parts []struct {
-					Text    string `json:"text"`
-					Thought bool   `json:"thought"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-
-	if err := json.Unmarshal(raw, &envelope); err != nil {
-		fail("response_decode", "Gemini returned an invalid response envelope")
-		return
-	}
-
-	if envelope.PromptFeedback.BlockReason != "" {
-		attempt.FinishReason = envelope.PromptFeedback.BlockReason
-		fail(
-			"blocked",
-			"Gemini blocked the request: "+envelope.PromptFeedback.BlockReason,
-		)
-		return
-	}
-
-	if len(envelope.Candidates) == 0 {
-		fail("empty_response", "Gemini returned no candidates")
-		return
-	}
-
-	candidate := envelope.Candidates[0]
-	attempt.FinishReason = candidate.FinishReason
-
-	if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
-		stage := "incomplete_response"
-		switch candidate.FinishReason {
-		case "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
-			stage = "blocked"
-		}
-		fail(
-			stage,
-			"Gemini generation ended with finish reason: "+candidate.FinishReason,
-		)
-		return
-	}
-
-	var text strings.Builder
-	for _, part := range candidate.Content.Parts {
-		if !part.Thought {
-			text.WriteString(part.Text)
+	for _, item := range strings.Split(value, ",") {
+		model := strings.TrimPrefix(strings.TrimSpace(item), "models/")
+		if model != "" && !seen[model] {
+			seen[model] = true
+			result = append(result, model)
 		}
 	}
-
-	if strings.TrimSpace(text.String()) == "" {
-		fail("empty_response", "Gemini returned no extraction text")
-		return
-	}
-
-	services, err = decodeRouteExtraction(text.String())
-	if err != nil {
-		fail("extraction_decode", err.Error())
-		return
-	}
-
-	attempt.Stage = "success"
-	return
+	return result
 }
 
-func extractRouteWithGemini(
+func extractRouteImage(
 	ctx context.Context,
 	data []byte,
 	mime string,
+	imageHash string,
 ) ([]ParsedRouteService, error) {
-	apiKey := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
-	if apiKey == "" {
-		return nil, &routeParseFailure{
-			HTTPStatus: http.StatusServiceUnavailable,
-			Code:       "GEMINI_KEY_MISSING",
-			Stage:      "configuration",
-			Message:    "GEMINI_API_KEY is not configured on this backend revision",
-		}
-	}
-
-	models := configuredRouteGeminiModels()
-	if len(models) == 0 {
-		return nil, &routeParseFailure{
-			HTTPStatus: http.StatusServiceUnavailable,
-			Code:       "GEMINI_MODELS_MISSING",
-			Stage:      "configuration",
-			Message:    "No Gemini models are configured",
-		}
+	key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
+	if key == "" {
+		return nil, errors.New("GEMINI_API_KEY is missing")
 	}
 
 	payload := map[string]any{
@@ -479,7 +361,7 @@ func extractRouteWithGemini(
 					map[string]any{
 						"inline_data": map[string]string{
 							"mime_type": mime,
-							"data": base64.StdEncoding.EncodeToString(data),
+							"data":      base64.StdEncoding.EncodeToString(data),
 						},
 					},
 				},
@@ -492,89 +374,114 @@ func extractRouteWithGemini(
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return nil, &routeParseFailure{
-			HTTPStatus: http.StatusInternalServerError,
-			Code:       "GEMINI_REQUEST_ENCODING_FAILED",
-			Stage:      "gemini",
-			Message:    "Backend could not encode the Gemini request",
-		}
+		return nil, err
 	}
 
-	attempts := make([]routeModelAttempt, 0, len(models))
+	attempts := make([]string, 0)
 
-	for _, model := range models {
+	for _, model := range configuredRouteGeminiModels() {
 		if ctx.Err() != nil {
-			break
+			return nil, ctx.Err()
 		}
 
-		services, attempt, err := attemptRouteGemini(
-			ctx, model, apiKey, body,
+		attemptCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		req, err := http.NewRequestWithContext(
+			attemptCtx,
+			http.MethodPost,
+			"https://generativelanguage.googleapis.com/v1beta/models/"+
+				url.PathEscape(model)+":generateContent",
+			bytes.NewReader(body),
 		)
-		attempts = append(attempts, attempt)
+		if err != nil {
+			cancel()
+			return nil, errors.New("Cannot create Gemini request")
+		}
 
-		if err == nil {
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-goog-api-key", key)
+
+		resp, requestErr := routeGeminiClient.Do(req)
+		if requestErr != nil {
+			cancel()
+			attempts = append(attempts, model+": request failed")
+			continue
+		}
+
+		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, (2<<20)+1))
+		resp.Body.Close()
+		cancel()
+
+		if readErr != nil || len(raw) > 2<<20 {
+			attempts = append(attempts, model+": invalid response size")
+			continue
+		}
+
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			return nil, errors.New("Gemini rejected the configured credentials")
+		}
+		if resp.StatusCode != http.StatusOK {
+			attempts = append(
+				attempts,
+				fmt.Sprintf("%s: HTTP %d", model, resp.StatusCode),
+			)
+			continue
+		}
+
+		var envelope struct {
+			PromptFeedback struct {
+				BlockReason string `json:"blockReason"`
+			} `json:"promptFeedback"`
+			Candidates []struct {
+				FinishReason string `json:"finishReason"`
+				Content      struct {
+					Parts []struct {
+						Text    string `json:"text"`
+						Thought bool   `json:"thought"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+
+		if json.Unmarshal(raw, &envelope) != nil {
+			attempts = append(attempts, model+": invalid response envelope")
+			continue
+		}
+		if envelope.PromptFeedback.BlockReason != "" {
+			return nil, errors.New("Gemini blocked screenshot processing")
+		}
+		if len(envelope.Candidates) == 0 {
+			attempts = append(attempts, model+": empty response")
+			continue
+		}
+
+		candidate := envelope.Candidates[0]
+		switch candidate.FinishReason {
+		case "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
+			return nil, errors.New("Gemini blocked screenshot processing")
+		case "", "STOP":
+		default:
+			attempts = append(attempts, model+": incomplete response")
+			continue
+		}
+
+		var text strings.Builder
+		for _, part := range candidate.Content.Parts {
+			if !part.Thought {
+				text.WriteString(part.Text)
+			}
+		}
+
+		services, decodeErr := decodeRouteExtraction(text.String(), imageHash)
+		if decodeErr == nil {
 			return services, nil
 		}
-
-		if attempt.HTTPStatus == http.StatusUnauthorized ||
-			attempt.HTTPStatus == http.StatusForbidden {
-			return nil, &routeParseFailure{
-				HTTPStatus: http.StatusBadGateway,
-				Code:       "GEMINI_ACCESS_DENIED",
-				Stage:      "gemini",
-				Message:    "Gemini rejected the API credentials or permissions; model fallback stopped",
-				Attempts:   attempts,
-			}
-		}
-
-		if attempt.Stage == "blocked" {
-			return nil, &routeParseFailure{
-				HTTPStatus: http.StatusUnprocessableEntity,
-				Code:       "GEMINI_CONTENT_BLOCKED",
-				Stage:      "gemini",
-				Message:    "Gemini blocked screenshot processing",
-				Attempts:   attempts,
-			}
-		}
+		attempts = append(attempts, model+": invalid extraction structure")
 	}
 
-	code := "GEMINI_ALL_MODELS_FAILED"
-	status := http.StatusBadGateway
-	message := "Screenshot extraction failed for every attempted Gemini model"
-
-	if ctx.Err() != nil {
-		code = "ROUTE_PARSE_DEADLINE"
-		status = http.StatusGatewayTimeout
-		message = "The overall screenshot parsing deadline was exceeded or the request was cancelled"
-	} else if len(attempts) > 0 {
-		all404, all429, allTimeout := true, true, true
-		for _, attempt := range attempts {
-			all404 = all404 && attempt.HTTPStatus == http.StatusNotFound
-			all429 = all429 && attempt.HTTPStatus == http.StatusTooManyRequests
-			allTimeout = allTimeout && attempt.Stage == "timeout"
-		}
-		switch {
-		case all404:
-			code = "GEMINI_MODELS_NOT_FOUND"
-			message = "Gemini returned 404 for every attempted model; inspect the upstream messages for model availability or API compatibility"
-		case all429:
-			code = "GEMINI_RATE_LIMITED"
-			status = http.StatusServiceUnavailable
-			message = "Every attempted Gemini model returned a quota or rate-limit error"
-		case allTimeout:
-			code = "GEMINI_MODELS_TIMED_OUT"
-			status = http.StatusGatewayTimeout
-			message = "Every attempted Gemini model timed out"
-		}
-	}
-
-	return nil, &routeParseFailure{
-		HTTPStatus: status,
-		Code:       code,
-		Stage:      "gemini",
-		Message:    message,
-		Attempts:   attempts,
-	}
+	return nil, fmt.Errorf(
+		"Screenshot extraction failed: %s",
+		strings.Join(attempts, "; "),
+	)
 }
 
 func parseRouteImage(
@@ -582,203 +489,361 @@ func parseRouteImage(
 	data []byte,
 	mime string,
 ) ([]ParsedRouteService, error) {
-	hash := routeHash(data)
-	var cached models.RouteImageCache
+	// Changing the extraction policy invalidates old image-cache results.
+	hash := routeHash(append(
+		[]byte(routeParserVersion+":"),
+		data...,
+	))
 
+	var cached models.RouteImageCache
 	err := database.RouteDB.WithContext(ctx).
 		First(&cached, "hash = ?", hash).Error
 
 	if err == nil {
-		if services, decodeErr := decodeRouteExtraction(
-			string(cached.Result),
-		); decodeErr == nil {
-			return services, nil
+		var result routeParseResult
+		if json.Unmarshal(cached.Result, &result) == nil &&
+			result.Services != nil {
+			return result.Services, nil
 		}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, &routeParseFailure{
-			HTTPStatus: http.StatusInternalServerError,
-			Code:       "ROUTE_CACHE_LOOKUP_FAILED",
-			Stage:      "database",
-			Message:    "Backend could not read the screenshot extraction cache",
-		}
+		return nil, errors.New("Screenshot cache lookup failed")
 	}
 
-	services, err := extractRouteWithGemini(ctx, data, mime)
+	services, err := extractRouteImage(ctx, data, mime, hash)
 	if err != nil {
 		return nil, err
 	}
 
 	encoded, err := json.Marshal(routeParseResult{Services: services})
-	if err != nil {
-		return nil, &routeParseFailure{
-			HTTPStatus: http.StatusInternalServerError,
-			Code:       "ROUTE_CACHE_ENCODING_FAILED",
-			Stage:      "database",
-			Message:    "Backend could not encode the extraction cache",
-		}
+	if err == nil {
+		// Cache failure does not discard successful extraction.
+		_ = database.RouteDB.WithContext(ctx).
+			Save(&models.RouteImageCache{
+				Hash:   hash,
+				Result: encoded,
+			}).Error
 	}
-
-	// A cache write failure does not discard a successful extraction.
-	_ = database.RouteDB.WithContext(ctx).
-		Save(&models.RouteImageCache{
-			Hash: hash, Result: encoded,
-		}).Error
-
 	return services, nil
 }
 
-func geocodeRouteAddress(
+func deduplicateRouteServices(
+	input []ParsedRouteService,
+) []ParsedRouteService {
+	result := make([]ParsedRouteService, 0, len(input))
+	positions := map[string]int{}
+
+	for _, service := range input {
+		if index, exists := positions[service.ID]; exists {
+			previous := result[index]
+
+			// Same reference with conflicting addresses must not be hidden.
+			if normalizeRouteAddress(previous.OriginalAddress) !=
+				normalizeRouteAddress(service.OriginalAddress) {
+				result[index].ExtractionIssues = append(
+					result[index].ExtractionIssues,
+					"Same service identifier appears with different addresses",
+				)
+			}
+			continue
+		}
+		positions[service.ID] = len(result)
+		result = append(result, service)
+	}
+
+	// Without identifiers, an overlap cannot always be distinguished
+	// from separate services at one address. Require review.
+	byAddress := map[string][]int{}
+	for index, service := range result {
+		if service.SourceReference == "" {
+			key := normalizeRouteAddress(service.OriginalAddress) +
+				":" + service.ServiceType
+			byAddress[key] = append(byAddress[key], index)
+		}
+	}
+
+	for _, indices := range byAddress {
+		if len(indices) < 2 {
+			continue
+		}
+		for _, index := range indices {
+			result[index].ExtractionIssues = append(
+				result[index].ExtractionIssues,
+				"Possible overlapping screenshot duplicate without a service identifier",
+			)
+		}
+	}
+	return result
+}
+
+type geoRouteProperties struct {
+	Formatted   string  `json:"formatted"`
+	Street      string  `json:"street"`
+	HouseNumber string  `json:"housenumber"`
+	Postcode    string  `json:"postcode"`
+	CountryCode string  `json:"country_code"`
+	City        string  `json:"city"`
+	Town        string  `json:"town"`
+	Village     string  `json:"village"`
+	Suburb      string  `json:"suburb"`
+	District    string  `json:"district"`
+	Lat         float64 `json:"lat"`
+	Lon         float64 `json:"lon"`
+	ResultType  string  `json:"result_type"`
+	Rank        struct {
+		Confidence       float64 `json:"confidence"`
+		StreetConfidence float64 `json:"confidence_street_level"`
+		MatchType        string  `json:"match_type"`
+	} `json:"rank"`
+}
+
+func candidateFor(
+	service ParsedRouteService,
+	point geoRouteProperties,
+) RouteCandidate {
+	locality := strings.Join([]string{
+		point.City,
+		point.Town,
+		point.Village,
+		point.Suburb,
+		point.District,
+	}, " ")
+
+	valid := validPoint(RouteInputStop{
+		Latitude:  point.Lat,
+		Longitude: point.Lon,
+	})
+
+	postalMatch := service.PostalCode != "" &&
+		point.Postcode == service.PostalCode
+
+	streetMatch := containsAddressWords(service.Street, point.Street)
+	localityMatch := containsAddressWords(service.Locality, locality)
+
+	houseMatch := service.HouseNumber != "" &&
+		addressWords(service.HouseNumber) == addressWords(point.HouseNumber)
+
+	exact := valid &&
+		strings.EqualFold(point.CountryCode, "pt") &&
+		postalMatch &&
+		streetMatch &&
+		localityMatch &&
+		houseMatch &&
+		point.Rank.Confidence >= 0.9 &&
+		point.Rank.StreetConfidence >= 0.9 &&
+		(point.ResultType == "building" ||
+			point.Rank.MatchType == "match_by_building" ||
+			point.Rank.MatchType == "full_match")
+
+	return RouteCandidate{
+		ID: routeHash([]byte(fmt.Sprintf(
+			"%s:%.7f:%.7f",
+			point.Formatted,
+			point.Lat,
+			point.Lon,
+		))),
+		Address:     point.Formatted,
+		Street:      point.Street,
+		HouseNumber: point.HouseNumber,
+		PostalCode:  point.Postcode,
+		Locality:    strings.TrimSpace(locality),
+		Latitude:    point.Lat,
+		Longitude:   point.Lon,
+		Confidence:  point.Rank.Confidence,
+		ResultType:  point.ResultType,
+		MatchType:   point.Rank.MatchType,
+		Exact:       exact,
+		CanConfirm: valid &&
+			strings.EqualFold(point.CountryCode, "pt") &&
+			postalMatch &&
+			point.Street != "",
+	}
+}
+
+func lookupRouteCandidates(
 	ctx context.Context,
-	address string,
-) (float64, float64, error) {
-	key := routeHash([]byte(normalizeRouteAddress(address)))
-	var cached models.RouteGeocodeCache
-
-	err := database.RouteDB.WithContext(ctx).
-		First(&cached, "key = ?", key).Error
-	if err == nil {
-		return cached.Latitude, cached.Longitude, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return 0, 0, errors.New("Geocoding cache lookup failed")
+	service ParsedRouteService,
+) ([]RouteCandidate, error) {
+	key := strings.TrimSpace(os.Getenv("GEOAPIFY_API_KEY"))
+	if key == "" {
+		return nil, errors.New("GEOAPIFY_API_KEY is missing")
 	}
 
-	apiKey := strings.TrimSpace(os.Getenv("GEOAPIFY_API_KEY"))
-	if apiKey == "" {
-		return 0, 0, errors.New("GEOAPIFY_API_KEY is missing")
-	}
-
-	q := url.Values{}
-	q.Set("text", address)
-	q.Set("filter", "countrycode:pt")
-	q.Set("limit", "1")
-	q.Set("apiKey", apiKey)
+	query := url.Values{}
+	query.Set("text", serviceAddress(service))
+	query.Set("filter", "countrycode:pt")
+	query.Set("limit", "5")
+	query.Set("apiKey", key)
 
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		"https://api.geoapify.com/v1/geocode/search?"+q.Encode(),
+		"https://api.geoapify.com/v1/geocode/search?"+query.Encode(),
 		nil,
 	)
 	if err != nil {
-		return 0, 0, errors.New("Cannot create geocoding request")
+		return nil, errors.New("Cannot create address lookup")
 	}
 
-	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err := routeGeocodeClient.Do(req)
 	if err != nil {
-		// Do not expose the request URL: it contains the geocoding key.
-		if ctx.Err() != nil {
-			return 0, 0, errors.New("Geocoding request deadline or cancellation")
-		}
-		return 0, 0, errors.New("Geocoding network request failed")
+		// Do not return an error containing the API-key URL.
+		return nil, errors.New("Address lookup is unavailable")
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, 0, fmt.Errorf("Geocoding HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("Address lookup HTTP %d", resp.StatusCode)
 	}
 
 	var result struct {
 		Features []struct {
-			Properties struct {
-				Lat      float64 `json:"lat"`
-				Lon      float64 `json:"lon"`
-				Postcode string  `json:"postcode"`
-			} `json:"properties"`
+			Properties geoRouteProperties `json:"properties"`
 		} `json:"features"`
 	}
 
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).
-		Decode(&result); err != nil {
-		return 0, 0, errors.New("Invalid geocoding response")
-	}
-	if len(result.Features) == 0 {
-		return 0, 0, errors.New("Address not found")
+	if err := json.NewDecoder(
+		io.LimitReader(resp.Body, 2<<20),
+	).Decode(&result); err != nil {
+		return nil, errors.New("Invalid address lookup response")
 	}
 
-	point := result.Features[0].Properties
-	requestedPostal := postalPattern.FindString(address)
+	candidates := make([]RouteCandidate, 0, len(result.Features))
+	seen := map[string]bool{}
 
-	if requestedPostal != "" && point.Postcode != requestedPostal {
-		return 0, 0, errors.New("Geocoding postal code mismatch")
+	for _, feature := range result.Features {
+		candidate := candidateFor(service, feature.Properties)
+		if !seen[candidate.ID] {
+			seen[candidate.ID] = true
+			candidates = append(candidates, candidate)
+		}
 	}
-	if point.Lat == 0 && point.Lon == 0 {
-		return 0, 0, errors.New("Invalid geocoding coordinates")
-	}
-
-	if err := database.RouteDB.WithContext(ctx).
-		Create(&models.RouteGeocodeCache{
-			Key:       key,
-			Address:   address,
-			Latitude:  point.Lat,
-			Longitude: point.Lon,
-		}).Error; err != nil {
-		return 0, 0, errors.New("Geocoding cache write failed")
-	}
-
-	return point.Lat, point.Lon, nil
+	return candidates, nil
 }
 
-func resolveRouteService(
+func reviewRouteService(
 	ctx context.Context,
 	service ParsedRouteService,
+	confirmation *RouteConfirmation,
 ) ParsedRouteService {
-	service.Status = "uncomplete"
+	service.Status = "needs_attention"
+	service.Stage = "extracted"
+	service.Reason = ""
+
 	service.Latitude = 0
 	service.Longitude = 0
+	service.RoadLatitude = 0
+	service.RoadLongitude = 0
+	service.SnapDistanceM = 0
 
-	if reason := validateRouteAddress(service.Address); reason != "" {
-		service.Reason = reason
-		return service
+	service.Confirmed = false
+	service.Confirmation = nil
+	service.MatchedAddress = ""
+	service.Candidates = []RouteCandidate{}
+
+	// Never trust an audit submitted by the browser.
+	service.Resolution = newRouteResolution(service)
+
+	if service.OriginalAddress == "" {
+		service.OriginalAddress = service.Address
+	}
+	service.Address = service.OriginalAddress
+
+	if confirmation != nil {
+		// This is an explicit user override, not an AI decision.
+		if !validPoint(RouteInputStop{
+			Latitude:  confirmation.Latitude,
+			Longitude: confirmation.Longitude,
+		}) {
+			return resolutionFailure(
+				service,
+				errors.New("Selected coordinates are invalid"),
+			)
+		}
+
+		service.Latitude = confirmation.Latitude
+		service.Longitude = confirmation.Longitude
+		service.Confirmation = &RouteConfirmation{
+			Latitude:  confirmation.Latitude,
+			Longitude: confirmation.Longitude,
+		}
+		service.Confirmed = true
+		service.Stage = "geocoded"
+		service.MatchedAddress = "User-confirmed location"
+
+		service.Resolution.Method = "user_pin"
+		service.Resolution.Decision = "selected"
+		service.Resolution.Reason =
+			"Location explicitly selected by the user"
+
+		// Even user-selected coordinates must pass the road check.
+		return applyRouteRoadCheck(ctx, service)
 	}
 
-	lat, lon, err := geocodeRouteAddress(ctx, service.Address)
+	normalized, err := normalizeRouteEvidence(
+		service,
+		service.Resolution,
+	)
+	service = normalized
+
 	if err != nil {
-		service.Reason = "Address needs geocoding verification: " + err.Error()
-		return service
+		return resolutionFailure(service, err)
 	}
 
-	service.Latitude = lat
-	service.Longitude = lon
-	service.Status = "complete"
-	service.Reason = ""
-	return service
+	candidates, err := lookupResolutionCandidates(
+		ctx,
+		service,
+		service.Resolution,
+	)
+	if err != nil {
+		return resolutionFailure(service, err)
+	}
+
+	service.Candidates = candidates
+	if len(candidates) > 0 {
+		service.Stage = "geocoded"
+	}
+
+	selected, err := resolveRouteCandidate(
+		ctx,
+		service,
+		candidates,
+		service.Resolution,
+	)
+	if err != nil {
+		return resolutionFailure(service, err)
+	}
+
+	// Coordinates are copied exclusively from the geocoder result.
+	// Gemini's response schema has no coordinate fields.
+	service.Latitude = selected.Latitude
+	service.Longitude = selected.Longitude
+	service.MatchedAddress = selected.Address
+	service.Stage = "geocoded"
+
+	return applyRouteRoadCheck(ctx, service)
 }
 
 func ParseRouteScreenshots(c *gin.Context) {
-	started := time.Now()
-	requestID := routeRequestID()
-
-	c.Header("X-Route-Request-ID", requestID)
 	c.Header("X-Route-Parser-Version", routeParserVersion)
 
-	fail := func(status int, code, stage, message string, image int) {
-		respondRouteFailure(c, requestID, started, image, &routeParseFailure{
-			HTTPStatus: status,
-			Code:       code,
-			Stage:      stage,
-			Message:    message,
-		})
-	}
-
 	if database.RouteDB == nil {
-		fail(503, "ROUTE_DATABASE_UNAVAILABLE", "database",
-			"Routes database is not initialized", 0)
+		c.JSON(503, gin.H{"error": "Routes database unavailable"})
 		return
 	}
 
+	// Includes multipart overhead for ten screenshots of up to 10 MiB.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 105<<20)
+
 	form, err := c.MultipartForm()
 	if err != nil {
-		fail(400, "INVALID_MULTIPART_FORM", "upload",
-			"Expected multipart form data with screenshots under the files field", 0)
+		c.JSON(400, gin.H{"error": "Expected screenshots under the files field"})
 		return
 	}
 	defer form.RemoveAll()
 
 	files := form.File["files"]
-	if len(files) == 0 || len(files) > 10 {
-		fail(400, "INVALID_SCREENSHOT_COUNT", "upload",
-			"Upload between 1 and 10 screenshots under the files field", 0)
+	if len(files) < 1 || len(files) > 10 {
+		c.JSON(400, gin.H{"error": "Upload between 1 and 10 screenshots"})
 		return
 	}
 
@@ -787,135 +852,130 @@ func ParseRouteScreenshots(c *gin.Context) {
 
 	var extracted []ParsedRouteService
 
-	for index, fileHeader := range files {
-		imageIndex := index + 1
-
-		if fileHeader.Size <= 0 || fileHeader.Size > 10<<20 {
-			fail(413, "INVALID_SCREENSHOT_SIZE", "upload",
-				"Each screenshot must contain data and be at most 10 MiB", imageIndex)
+	for index, header := range files {
+		if header.Size <= 0 || header.Size > 10<<20 {
+			c.JSON(413, gin.H{"error": "Each screenshot must be at most 10 MiB"})
 			return
 		}
 
-		file, err := fileHeader.Open()
-		if err != nil {
-			fail(400, "SCREENSHOT_OPEN_FAILED", "upload",
-				"Cannot open uploaded screenshot", imageIndex)
+		file, openErr := header.Open()
+		if openErr != nil {
+			c.JSON(400, gin.H{"error": "Cannot open screenshot"})
 			return
 		}
-
 		data, readErr := io.ReadAll(io.LimitReader(file, (10<<20)+1))
 		file.Close()
 
-		if readErr != nil {
-			fail(400, "SCREENSHOT_READ_FAILED", "upload",
-				"Cannot read uploaded screenshot", imageIndex)
-			return
-		}
-		if len(data) > 10<<20 {
-			fail(413, "SCREENSHOT_TOO_LARGE", "upload",
-				"Screenshot exceeds 10 MiB", imageIndex)
+		if readErr != nil || len(data) > 10<<20 {
+			c.JSON(413, gin.H{"error": "Cannot read screenshot or file is too large"})
 			return
 		}
 
 		mime := http.DetectContentType(data)
 		if mime != "image/png" && mime != "image/jpeg" && mime != "image/webp" {
-			fail(400, "UNSUPPORTED_SCREENSHOT_TYPE", "upload",
-				"Use PNG, JPEG or WebP screenshots", imageIndex)
+			c.JSON(400, gin.H{"error": "Use PNG, JPEG or WebP screenshots"})
 			return
 		}
 
-		services, err := parseRouteImage(ctx, data, mime)
-		if err != nil {
-			var failure *routeParseFailure
-			if errors.As(err, &failure) {
-				respondRouteFailure(c, requestID, started, imageIndex, failure)
-			} else {
-				fail(500, "ROUTE_PARSE_INTERNAL_ERROR", "internal",
-					"Unexpected screenshot processing error", imageIndex)
-			}
+		services, parseErr := parseRouteImage(ctx, data, mime)
+		if parseErr != nil {
+			c.JSON(502, gin.H{
+				"error":          parseErr.Error(),
+				"image_index":    index + 1,
+				"parser_version": routeParserVersion,
+			})
 			return
 		}
 
-		extracted = append(extracted, services...)
+		for _, service := range services {
+			service.SourceImage = index + 1
+			extracted = append(extracted, service)
+		}
 	}
 
-	resolved := make(map[string]ParsedRouteService)
-	complete := make([]ParsedRouteService, 0)
-	uncomplete := make([]ParsedRouteService, 0)
+	services := deduplicateRouteServices(extracted)
 
-	for _, service := range extracted {
+	// Preserve extracted work even when lookup/road checks fail.
+	// A failure becomes an individual review item, not a lost batch.
+	for index := range services {
 		if ctx.Err() != nil {
-			fail(504, "ROUTE_GEOCODING_DEADLINE", "geocoding",
-				"Request deadline or cancellation interrupted address verification", 0)
-			return
+			services[index].Status = "needs_attention"
+			services[index].Reason = "Verification interrupted; retry this address"
+			continue
 		}
+		services[index] = reviewRouteService(ctx, services[index], nil)
+	}
 
-		key := normalizeRouteAddress(service.Address)
-		base, ok := resolved[key]
-		if !ok {
-			base = resolveRouteService(ctx, service)
-			resolved[key] = base
-		}
+	ready := make([]ParsedRouteService, 0)
+	attention := make([]ParsedRouteService, 0)
 
-		service.Status = base.Status
-		service.Reason = base.Reason
-		service.Latitude = base.Latitude
-		service.Longitude = base.Longitude
-
-		if service.Status == "complete" {
-			complete = append(complete, service)
+	for _, service := range services {
+		if service.Status == "ready" {
+			ready = append(ready, service)
 		} else {
-			uncomplete = append(uncomplete, service)
+			attention = append(attention, service)
 		}
 	}
 
-	if ctx.Err() != nil {
-		fail(504, "ROUTE_GEOCODING_DEADLINE", "geocoding",
-			"Request deadline or cancellation interrupted address verification", 0)
-		return
-	}
-
-	log.Printf(
-		"route_parse_success request_id=%s revision=%s duration_ms=%d screenshots=%d complete=%d uncomplete=%d",
-		requestID,
-		os.Getenv("K_REVISION"),
-		time.Since(started).Milliseconds(),
-		len(files),
-		len(complete),
-		len(uncomplete),
-	)
-
-	c.JSON(http.StatusOK, gin.H{
-		"complete":       complete,
-		"uncomplete":     uncomplete,
-		"request_id":     requestID,
+	c.JSON(200, gin.H{
+		"services": services,
+		// Compatibility with existing consumers.
+		"complete":       ready,
+		"uncomplete":     attention,
 		"parser_version": routeParserVersion,
-		"revision":       os.Getenv("K_REVISION"),
 	})
 }
 
 func VerifyRouteAddress(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(
+		c.Writer,
+		c.Request.Body,
+		256<<10,
+	)
+
 	var input struct {
-		Address string `json:"address" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&input); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		Service ParsedRouteService `json:"service"`
+		Address string             `json:"address"`
+		Confirm *RouteConfirmation `json:"confirm"`
 	}
 
-	if database.RouteDB == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"error": "Routes database unavailable",
+	if c.ShouldBindJSON(&input) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Invalid address review request",
 		})
 		return
 	}
 
-	result := resolveRouteService(
+	if input.Service.OriginalAddress == "" {
+		input.Service.OriginalAddress = input.Address
+	}
+
+	if strings.TrimSpace(input.Service.OriginalAddress) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Original address is required",
+		})
+		return
+	}
+
+	if input.Service.ID == "" {
+		input.Service.ID = routeHash(
+			[]byte(input.Service.OriginalAddress),
+		)
+	}
+
+	ctx, cancel := context.WithTimeout(
 		c.Request.Context(),
-		ParsedRouteService{
-			Address:     strings.TrimSpace(input.Address),
-			ServiceType: "unknown",
-		},
+		90*time.Second,
 	)
-	c.JSON(http.StatusOK, result)
+	defer cancel()
+
+	result := reviewRouteService(
+		ctx,
+		input.Service,
+		input.Confirm,
+	)
+
+	c.JSON(http.StatusOK, gin.H{
+		"service": result,
+	})
 }

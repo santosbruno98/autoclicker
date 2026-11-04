@@ -22,11 +22,33 @@ function database() {
       );
 
       request.onupgradeneeded = () => {
-        request.result.createObjectStore('records');
+        const db = request.result;
+
+        if (!db.objectStoreNames.contains('records')) {
+          db.createObjectStore('records');
+        }
       };
 
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+
+        db.onversionchange = () => {
+          db.close();
+          databasePromise = undefined;
+        };
+
+        resolve(db);
+      };
+
+      request.onerror = () => {
+        reject(
+          request.error ||
+          new Error('Cannot open device storage')
+        );
+      };
+    }).catch((error) => {
+      databasePromise = undefined;
+      throw error;
     });
   }
 
@@ -37,14 +59,25 @@ export async function readDevice(key) {
   const db = await database();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('records', 'readonly');
-    const request = tx.objectStore('records').get(key);
-
-    tx.oncomplete = () => resolve(request.result ?? null);
-
-    tx.onabort = () => reject(
-      tx.error || new Error('Device storage read failed')
+    const transaction = db.transaction(
+      'records',
+      'readonly'
     );
+
+    const request = transaction
+      .objectStore('records')
+      .get(key);
+
+    transaction.oncomplete = () => {
+      resolve(request.result ?? null);
+    };
+
+    transaction.onabort = () => {
+      reject(
+        transaction.error ||
+        new Error('Device storage read failed')
+      );
+    };
   });
 }
 
@@ -52,8 +85,12 @@ async function editDevice(key, change) {
   const db = await database();
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction('records', 'readwrite');
-    const objectStore = tx.objectStore('records');
+    const transaction = db.transaction(
+      'records',
+      'readwrite'
+    );
+
+    const objectStore = transaction.objectStore('records');
     const request = objectStore.get(key);
 
     let next;
@@ -70,44 +107,60 @@ async function editDevice(key, change) {
         }
       } catch (error) {
         failure = error;
-        tx.abort();
+        transaction.abort();
       }
     };
 
-    tx.oncomplete = () => resolve(next);
+    transaction.oncomplete = () => resolve(next);
 
-    tx.onabort = () => reject(
-      failure ||
-      tx.error ||
-      new Error('Device storage write failed')
-    );
+    transaction.onabort = () => {
+      reject(
+        failure ||
+        transaction.error ||
+        new Error('Device storage write failed')
+      );
+    };
   });
 }
 
-export const rememberPlannerUser = (user) =>
-  editDevice(
+export function rememberPlannerUser(user) {
+  return editDevice(
     'identity',
-    () => user && ({
-      user_id: user.user_id,
-      email: user.email,
-    })
+    () => user
+      ? {
+          user_id: user.user_id,
+          email: user.email,
+        }
+      : null
   );
+}
 
-export const lastPlannerUser = () =>
-  readDevice('identity');
+export function lastPlannerUser() {
+  return readDevice('identity');
+}
 
-export const readPlanner = (id) =>
-  readDevice(`planner:${id}`);
+export function readPlanner(userId) {
+  return readDevice(`planner:${userId}`);
+}
 
 export function emptyPlanner() {
   return {
     schema: 1,
     origin: null,
+    originError: '',
+
+    // Null preserves compatibility with legacy snapshots.
+    // The page migrates old complete/incomplete records for review.
+    services: null,
+
     complete: [],
     incomplete: [],
+    corrections: {},
+
     plans: [],
     selectedId: null,
     tab: 'complete',
+
     screenshotCount: 0,
     phase: 'idle',
     error: '',
@@ -115,35 +168,83 @@ export function emptyPlanner() {
 }
 
 function restoredState(state) {
+  if (
+    !state ||
+    typeof state !== 'object' ||
+    Array.isArray(state) ||
+    state.schema !== 1
+  ) {
+    throw new Error('Unsupported saved planner format');
+  }
+
   const next = {
     ...emptyPlanner(),
     ...state,
+    complete: Array.isArray(state.complete)
+      ? state.complete
+      : [],
+    incomplete: Array.isArray(state.incomplete)
+      ? state.incomplete
+      : [],
+    plans: Array.isArray(state.plans)
+      ? state.plans
+      : [],
+    services: Array.isArray(state.services)
+      ? state.services
+      : null,
+    corrections:
+      state.corrections &&
+      typeof state.corrections === 'object' &&
+      !Array.isArray(state.corrections)
+        ? state.corrections
+        : {},
   };
 
   if (['extracting', 'optimizing'].includes(next.phase)) {
     next.phase = 'interrupted';
     next.error =
-      'Processing was interrupted. Select screenshots again or ' +
-      'explicitly regenerate; saved results have been preserved.';
+      'Processing was interrupted. Saved addresses and routes remain. ' +
+      'Retry the operation explicitly when connected.';
   }
 
   return next;
 }
 
-const fromCloud = (snapshot) =>
-  snapshot && ({
-    ...snapshot,
+function fromCloud(snapshot) {
+  if (!snapshot) return null;
+
+  if (
+    typeof snapshot.version !== 'string' ||
+    !snapshot.version
+  ) {
+    throw new Error('Cloud snapshot has no version');
+  }
+
+  return {
+    version: snapshot.version,
+    updated_at: snapshot.updated_at,
+    state: restoredState(snapshot.state),
     baseVersion: snapshot.version,
     dirty: false,
-  });
+  };
+}
 
-const newVersion = () => crypto.randomUUID();
+function newVersion() {
+  return crypto.randomUUID();
+}
 
 export class PlannerStore {
-  constructor(id) {
-    this.key = `planner:${id}`;
+  constructor(userId) {
+    this.key = `planner:${userId}`;
     this.listeners = new Set();
+
     this.remote = false;
+    this.disposed = false;
+    this.syncing = false;
+    this.again = false;
+
+    this.timer = null;
+    this.opening = null;
     this.writes = Promise.resolve();
 
     this.view = {
@@ -151,21 +252,27 @@ export class PlannerStore {
       record: null,
       candidate: null,
       cloud: null,
+      cloudAvailable: false,
       conflict: null,
+      fresh: false,
       status: 'Loading saved journey…',
       error: '',
-      fresh: false,
     };
   }
 
   subscribe = (listener) => {
     this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+
+    return () => {
+      this.listeners.delete(listener);
+    };
   };
 
   getSnapshot = () => this.view;
 
   emit(patch) {
+    if (this.disposed) return;
+
     this.view = {
       ...this.view,
       ...patch,
@@ -177,22 +284,32 @@ export class PlannerStore {
   }
 
   setRemote(allowed) {
-    this.remote = allowed;
+    this.remote = Boolean(allowed) && !this.disposed;
 
-    if (!allowed) {
+    if (!this.remote) {
       clearTimeout(this.timer);
     }
+  }
+
+  dispose() {
+    this.remote = false;
+    this.disposed = true;
+    clearTimeout(this.timer);
   }
 
   schedule() {
     clearTimeout(this.timer);
 
     if (
+      !this.disposed &&
       this.remote &&
       navigator.onLine &&
-      !this.view.conflict
+      !this.view.conflict &&
+      this.view.phase === 'active'
     ) {
-      this.timer = setTimeout(() => this.sync(), 500);
+      this.timer = setTimeout(() => {
+        void this.sync();
+      }, 500);
     }
   }
 
@@ -207,6 +324,8 @@ export class PlannerStore {
   async load() {
     try {
       const local = await readDevice(this.key);
+
+      if (this.disposed) return;
 
       if (!this.remote || !navigator.onLine) {
         if (local) {
@@ -238,10 +357,16 @@ export class PlannerStore {
           { timeout: 10000 }
         );
 
-        cloud = response.data.snapshot;
+        cloud = response.data.snapshot ?? null;
+
+        // Validate the snapshot before offering it for restoration.
+        if (cloud) fromCloud(cloud);
       } catch {
         available = false;
+        cloud = null;
       }
+
+      if (this.disposed) return;
 
       const candidate = local?.dirty
         ? local
@@ -263,23 +388,33 @@ export class PlannerStore {
     } catch (error) {
       this.emit({
         phase: 'error',
-        error: `Device storage unavailable: ${error.message}`,
+        error: `Cannot load saved planner: ${error.message}`,
       });
     }
   }
 
   async install(record, fresh = false) {
     await this.writes;
-    await editDevice(this.key, () => record);
+
+    if (this.disposed) return;
+
+    const normalized = {
+      ...record,
+      state: restoredState(record.state),
+    };
+
+    await editDevice(this.key, () => normalized);
+
+    if (this.disposed) return;
 
     this.emit({
       phase: 'active',
-      record,
+      record: normalized,
       candidate: null,
       conflict: null,
       fresh,
       error: '',
-      status: record.dirty
+      status: normalized.dirty
         ? 'Saved on this device · waiting to sync'
         : 'Saved journey restored',
     });
@@ -289,17 +424,15 @@ export class PlannerStore {
 
   async continuePrevious() {
     let record = this.view.candidate;
-
-    if (!record) {
-      return;
-    }
+    if (!record) return;
 
     record = {
       ...record,
       state: restoredState(record.state),
     };
 
-    // The cloud copy expired, but the device still has it.
+    // Redis expired, but this device still has a clean local copy.
+    // Re-upload only after the user explicitly restores it.
     if (
       this.view.cloudAvailable &&
       !this.view.cloud &&
@@ -317,17 +450,32 @@ export class PlannerStore {
   }
 
   async startNew() {
-    const cloud = this.view.cloud;
+    await this.writes;
+
     const previous =
       this.view.record || this.view.candidate;
 
-    const baseVersion = this.view.cloudAvailable
-      ? cloud?.version || ''
-      : previous?.baseVersion || '';
+    // An active record may have synchronized since the page loaded.
+    // Its current base version takes precedence over initial metadata.
+    const baseVersion = this.view.record
+      ? this.view.record.baseVersion || ''
+      : this.view.cloudAvailable
+        ? this.view.cloud?.version || ''
+        : previous?.baseVersion || '';
+
+    const previousState = previous?.state;
+    const corrections =
+      previousState?.corrections &&
+      typeof previousState.corrections === 'object'
+        ? previousState.corrections
+        : {};
 
     await this.install(
       {
-        state: emptyPlanner(),
+        state: {
+          ...emptyPlanner(),
+          corrections,
+        },
         baseVersion,
         version: newVersion(),
         updated_at: new Date().toISOString(),
@@ -338,36 +486,40 @@ export class PlannerStore {
   }
 
   consumeFresh() {
-    if (!this.view.fresh) {
-      return false;
-    }
+    if (!this.view.fresh) return false;
 
     this.emit({ fresh: false });
     return true;
   }
 
   change(change) {
-    if (!this.view.record) {
+    if (this.disposed || !this.view.record) {
       return Promise.reject(
-        new Error('Planner is not loaded')
+        new Error('Planner is not available')
       );
     }
 
-    const expected = this.view.record.version;
+    const expectedVersion = this.view.record.version;
 
-    const state = typeof change === 'function'
+    const nextState = typeof change === 'function'
       ? change(this.view.record.state)
       : change;
 
+    if (!nextState || nextState.schema !== 1) {
+      return Promise.reject(
+        new Error('Invalid planner state')
+      );
+    }
+
     const version = newVersion();
-    const updated_at = new Date().toISOString();
+    const updatedAt = new Date().toISOString();
 
     this.emit({
       record: {
         ...this.view.record,
-        state,
+        state: nextState,
         version,
-        updated_at,
+        updated_at: updatedAt,
         dirty: true,
       },
       status: 'Saving on this device…',
@@ -375,7 +527,7 @@ export class PlannerStore {
 
     const write = this.writes.then(() =>
       editDevice(this.key, (current) => {
-        if (current?.version !== expected) {
+        if (current?.version !== expectedVersion) {
           throw new Error(
             'Another tab changed this journey. ' +
             'Reload to restore the latest device copy.'
@@ -384,9 +536,9 @@ export class PlannerStore {
 
         return {
           ...current,
-          state,
+          state: nextState,
           version,
-          updated_at,
+          updated_at: updatedAt,
           dirty: true,
         };
       })
@@ -396,7 +548,7 @@ export class PlannerStore {
 
     return write
       .then((record) => {
-        if (this.view.record.version === version) {
+        if (this.view.record?.version === version) {
           this.emit({
             record,
             status: 'Saved on this device · waiting to sync',
@@ -418,6 +570,7 @@ export class PlannerStore {
 
   async sync() {
     if (
+      this.disposed ||
       this.syncing ||
       !this.remote ||
       !navigator.onLine ||
@@ -434,7 +587,11 @@ export class PlannerStore {
 
       const sent = await readDevice(this.key);
 
-      if (!sent?.dirty) {
+      if (
+        !sent?.dirty ||
+        this.disposed ||
+        !this.remote
+      ) {
         return;
       }
 
@@ -452,7 +609,13 @@ export class PlannerStore {
         { timeout: 12000 }
       );
 
+      if (this.disposed) return;
+
       const cloud = response.data.snapshot;
+
+      if (!cloud || cloud.version !== sent.version) {
+        throw new Error('Invalid planner save response');
+      }
 
       await editDevice(this.key, (current) => {
         if (
@@ -487,6 +650,7 @@ export class PlannerStore {
           record: latest,
           cloud,
           cloudAvailable: true,
+          error: '',
           status: latest.dirty
             ? 'More device changes waiting to sync'
             : 'Saved to Upstash · retained for 24 hours after this save',
@@ -497,10 +661,12 @@ export class PlannerStore {
         this.again = true;
       }
     } catch (error) {
+      if (this.disposed) return;
+
       if (error.response?.status === 409) {
         this.emit({
           conflict: {
-            snapshot: error.response.data.snapshot,
+            snapshot: error.response.data.snapshot ?? null,
           },
           status:
             'A newer cloud copy exists. Choose which copy to keep.',
@@ -511,9 +677,9 @@ export class PlannerStore {
             'Saved on this device · sign in again to synchronize',
         });
 
-        window.dispatchEvent(
-          new Event('auth:expired')
-        );
+        if (this.remote) {
+          window.dispatchEvent(new Event('auth:expired'));
+        }
       } else {
         this.emit({
           status:
@@ -526,7 +692,7 @@ export class PlannerStore {
     } finally {
       this.syncing = false;
 
-      if (this.again) {
+      if (this.again && !this.disposed) {
         this.again = false;
         this.schedule();
       }
@@ -534,12 +700,16 @@ export class PlannerStore {
   }
 
   async useCloud() {
-    const snapshot = this.view.conflict?.snapshot;
+    if (!this.view.conflict) return;
+
+    const snapshot = this.view.conflict.snapshot;
 
     if (snapshot) {
-      await this.install({
-        ...fromCloud(snapshot),
-        state: restoredState(snapshot.state),
+      await this.install(fromCloud(snapshot));
+
+      this.emit({
+        cloud: snapshot,
+        cloudAvailable: true,
       });
     } else {
       await this.install({
@@ -549,17 +719,30 @@ export class PlannerStore {
         updated_at: new Date().toISOString(),
         dirty: true,
       });
+
+      this.emit({
+        cloud: null,
+        cloudAvailable: true,
+      });
     }
   }
 
   async keepDevice() {
+    if (!this.view.conflict) return;
+
+    await this.writes;
+
     const current = await readDevice(this.key);
+    if (!current) {
+      throw new Error('No saved device copy is available');
+    }
 
     await this.install({
       ...current,
       baseVersion:
-        this.view.conflict?.snapshot?.version || '',
+        this.view.conflict.snapshot?.version || '',
       version: newVersion(),
+      updated_at: new Date().toISOString(),
       dirty: true,
     });
   }
@@ -567,7 +750,7 @@ export class PlannerStore {
 
 export function resetPlannerSession() {
   for (const store of stores.values()) {
-    store.setRemote(false);
+    store.dispose();
   }
 
   stores.clear();
@@ -598,9 +781,11 @@ export function usePlanner() {
 
   useEffect(() => {
     store.setRemote(!identity.localOnly);
-    store.open();
+    void store.open();
 
-    const sync = () => store.sync();
+    const sync = () => {
+      void store.sync();
+    };
 
     const visible = () => {
       if (document.visibilityState === 'visible') {
@@ -616,10 +801,7 @@ export function usePlanner() {
     return () => {
       clearInterval(timer);
       window.removeEventListener('online', sync);
-      document.removeEventListener(
-        'visibilitychange',
-        visible
-      );
+      document.removeEventListener('visibilitychange', visible);
       store.setRemote(false);
     };
   }, [store, identity.localOnly]);

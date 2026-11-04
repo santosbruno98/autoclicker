@@ -20,7 +20,7 @@ echo "Extracting Guarda coverage..."
 # This is NOT the official district polygon.
 # Cross-border routes may require Spanish OSM data.
 osmium extract \
-  --bbox=-8.10,40.10,-6.65,41.15 \
+  --bbox=-8.20,40.00,-6.50,41.40 \
   --strategy=complete_ways \
   --overwrite \
   --output=guarda.osm.pbf \
