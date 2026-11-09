@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"autoclicker/pkg/database"
-	"autoclicker/pkg/models"
 	"autoclicker/pkg/services"
 
 	"github.com/gin-gonic/gin"
@@ -47,13 +46,13 @@ type PortfolioDividendEstimate struct {
 }
 
 func GetPortfolioDividends(c *gin.Context) {
-	var holdings []models.Holding
-
-	if err := database.PortfolioDB.
-		Order("symbol asc").
-		Find(&holdings).Error; err != nil {
+	groups, err := portfolioTradeGroups(
+		database.PortfolioDB.WithContext(c.Request.Context()),
+	)
+	if err != nil {
+		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "failed to load portfolio holdings",
+			"error": "failed to load portfolio trades",
 		})
 		return
 	}
@@ -63,7 +62,7 @@ func GetPortfolioDividends(c *gin.Context) {
 	usdToEUR, fxErr := services.FetchFXRate("USD", "EUR")
 
 	response := PortfolioDividendEstimate{
-		Holdings:     make([]HoldingDividendEstimate, len(holdings)),
+		Holdings:     make([]HoldingDividendEstimate, len(groups)),
 		TaxRate:      estimatedPortugueseDividendTaxRate,
 		FXUSDToEUR:   usdToEUR,
 		Complete:     true,
@@ -75,96 +74,83 @@ func GetPortfolioDividends(c *gin.Context) {
 	// Bound concurrency to avoid excessive Yahoo requests.
 	limit := make(chan struct{}, 4)
 
-	for i, holding := range holdings {
+	for i, trades := range groups {
 		wg.Add(1)
 
-		go func(index int, h models.Holding) {
+		go func() {
 			defer wg.Done()
 
 			limit <- struct{}{}
 			defer func() { <-limit }()
 
+			first := trades[0]
 			result := HoldingDividendEstimate{
-				HoldingID: h.ID,
-				Symbol:    h.Symbol,
-				Shares:    h.Shares,
-				Events:    []services.DividendEvent{},
+				HoldingID:    first.ID,
+				Symbol:       first.Symbol,
+				PurchaseDate: portfolioTradeDay(first),
+				Events:       []services.DividendEvent{},
 			}
+			defer func() { response.Holdings[i] = result }()
 
-			if h.PurchaseDate == nil {
-				result.Error = "Purchase date is missing"
-				response.Holdings[index] = result
+			if result.PurchaseDate == "" {
+				result.Error = "An opening purchase date is missing"
 				return
 			}
 
-			result.PurchaseDate = h.PurchaseDate.Format("2006-01-02")
-
-			if h.Shares <= 0 {
-				result.Error = "No shares held"
-				response.Holdings[index] = result
+			shares, err := portfolioShareBalance(trades, "")
+			if err != nil {
+				result.Error = err.Error()
 				return
 			}
+			result.Shares = shares
 
-			// Yahoo quote currency is the currency of
-			// the security's quoted dividend history.
-			quote, err := services.FetchQuote(h.Symbol)
+			quote, err := services.FetchQuote(first.Symbol)
 			if err != nil {
 				result.Error = "Quote unavailable: " + err.Error()
-				response.Holdings[index] = result
 				return
 			}
-
 			result.Currency = strings.ToUpper(quote.Currency)
-
-			if result.Currency != "EUR" &&
-				result.Currency != "USD" {
-				result.Error = "Unsupported dividend currency: " +
-					result.Currency
-				response.Holdings[index] = result
+			if result.Currency != "EUR" && result.Currency != "USD" {
+				result.Error = "Unsupported dividend currency: " + result.Currency
 				return
 			}
 
 			events, err := services.FetchDividendHistory(
-				h.Symbol,
-				*h.PurchaseDate,
-				forceRefresh,
+				first.Symbol, *first.PurchaseDate, forceRefresh,
 			)
-
 			if err != nil {
 				result.Error = err.Error()
-				response.Holdings[index] = result
 				return
 			}
 
-			result.Events = events
-			result.EventsCount = len(events)
-
 			for _, event := range events {
-				result.GrossOriginal +=
-					event.AmountPerShare * h.Shares
+				// Use the balance before the ex-date. A purchase entered on
+				// the ex-date does not contribute to this estimate.
+				eligibleShares, err := portfolioShareBalance(trades, event.ExDate)
+				if err != nil {
+					result.Error = err.Error()
+					return
+				}
+				if eligibleShares > 0 {
+					result.Events = append(result.Events, event)
+					result.GrossOriginal += event.AmountPerShare * eligibleShares
+				}
 			}
+			result.EventsCount = len(result.Events)
 
 			rate := 1.0
-
 			if result.Currency == "USD" {
 				if fxErr != nil || usdToEUR <= 0 {
 					result.Error = "USD/EUR exchange rate unavailable"
-					response.Holdings[index] = result
 					return
 				}
 				rate = usdToEUR
 			}
 
 			result.GrossEUR = result.GrossOriginal * rate
-
-			result.EstimatedTaxEUR =
-				result.GrossEUR * estimatedPortugueseDividendTaxRate
-
-			result.EstimatedNetEUR =
-				result.GrossEUR - result.EstimatedTaxEUR
-
-			response.Holdings[index] = result
-		}(i, holding)
+			result.EstimatedTaxEUR = result.GrossEUR * estimatedPortugueseDividendTaxRate
+			result.EstimatedNetEUR = result.GrossEUR - result.EstimatedTaxEUR
+		}()
 	}
 
 	wg.Wait()

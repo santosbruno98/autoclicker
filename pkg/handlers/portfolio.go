@@ -5,20 +5,26 @@ import (
 	"autoclicker/pkg/models"
 	"autoclicker/pkg/services"
 	"fmt"
-	"log"
+	"math/big"
 	"net/http"
 	"strconv"
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 const portfolioWorkerCount = 8
 
 func GetHoldings(c *gin.Context) {
-	var holdings []models.Holding
-	if err := database.PortfolioDB.Order("symbol desc").Find(&holdings).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	holdings := make([]models.Holding, 0)
+	err := database.PortfolioDB.WithContext(c.Request.Context()).
+		Where("trade_request_id IS NULL").
+		Order("symbol desc").
+		Find(&holdings).Error
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not load holdings"})
 		return
 	}
 	c.JSON(http.StatusOK, holdings)
@@ -26,91 +32,216 @@ func GetHoldings(c *gin.Context) {
 
 func CreateHolding(c *gin.Context) {
 	var holding models.Holding
-	if err := c.ShouldBindJSON(&holding); err != nil {
-		log.Printf("CreateHolding JSON binding error: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if c.ShouldBindJSON(&holding) != nil || !validLegacyHolding(&holding) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid holding"})
 		return
 	}
 
-	if err := database.PortfolioDB.Create(&holding).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	holding.ID = 0
+	holding.Side = models.TradeBuy
+
+	err := withPortfolioWrite(c, func(tx *gorm.DB) error {
+		if err := tx.Create(&holding).Error; err != nil {
+			return err
+		}
+		return validatePortfolioSymbol(tx, holding.Symbol)
+	})
+	if err != nil {
+		writePortfolioError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, holding)
 }
 
 func UpdateHolding(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid holding ID"})
 		return
 	}
 
 	var holding models.Holding
-	if err := database.PortfolioDB.First(&holding, id).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Holding not found"})
+	invalidInput := false
+
+	err = withPortfolioWrite(c, func(tx *gorm.DB) error {
+		if err := tx.Where("trade_request_id IS NULL").First(&holding, id).Error; err != nil {
+			return err
+		}
+
+		previousSymbol := normalizePortfolioSymbol(holding.Symbol)
+		originalID := holding.ID
+		if err := c.ShouldBindJSON(&holding); err != nil {
+			invalidInput = true
+			return err
+		}
+		holding.ID = originalID
+		holding.Side = models.TradeBuy
+
+		if !validLegacyHolding(&holding) {
+			invalidInput = true
+			return fmt.Errorf("invalid holding")
+		}
+
+		if err := tx.Save(&holding).Error; err != nil {
+			return err
+		}
+		if err := validatePortfolioSymbol(tx, previousSymbol); err != nil {
+			return err
+		}
+		if holding.Symbol != previousSymbol {
+			return validatePortfolioSymbol(tx, holding.Symbol)
+		}
+		return nil
+	})
+
+	if invalidInput {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid holding"})
 		return
 	}
-
-	if err := c.ShouldBindJSON(&holding); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if err != nil {
+		writePortfolioError(c, err)
 		return
 	}
-
-	database.PortfolioDB.Save(&holding)
 	c.JSON(http.StatusOK, holding)
 }
 
 func DeleteHolding(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid holding ID"})
 		return
 	}
 
-	if err := database.PortfolioDB.Delete(&models.Holding{}, id).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Holding not found"})
+	err = withPortfolioWrite(c, func(tx *gorm.DB) error {
+		var holding models.Holding
+		if err := tx.Where("trade_request_id IS NULL").First(&holding, id).Error; err != nil {
+			return err
+		}
+		if err := tx.Delete(&holding).Error; err != nil {
+			return err
+		}
+		return validatePortfolioSymbol(tx, normalizePortfolioSymbol(holding.Symbol))
+	})
+	if err != nil {
+		writePortfolioError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Holding deleted"})
 }
 
 func GetPortfolioSummary(c *gin.Context) {
-	var holdings []models.Holding
-	var settings models.PortfolioSettings
-	if err := database.PortfolioDB.Order("symbol asc").Find(&holdings).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	db := database.PortfolioDB.WithContext(c.Request.Context())
+	groups, err := portfolioTradeGroups(db)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not load portfolio trades"})
 		return
 	}
 
-	results := processHoldingQuotes(holdings)
+	positions := make([]models.Holding, 0, len(groups))
+	costs := make([]models.PositionCost, 0, len(groups))
+	costErrors := make([]error, 0, len(groups))
+	estimates := make([]bool, 0, len(groups))
+	rates := make(map[string]*big.Rat)
 
-	// The bug: this used to stay an empty slice forever — totals were summed
-	// from `results` directly below, but `results` itself was never assigned
-	// into the response. Fixed by making Holdings just *be* results.
-	summary := models.PortfolioSummary{Holdings: results}
+	for _, trades := range groups {
+		shares, err := portfolioShareBalance(trades, "")
+		if err != nil {
+			c.Error(err)
+			c.JSON(http.StatusConflict, gin.H{"error": "Portfolio contains an invalid trade history"})
+			return
+		}
 
-	var totalCostUSD float64
-	for _, hq := range results {
-		summary.TotalValueEUR += hq.MarketValueEUR
-		summary.TotalValueUSD += hq.MarketValueUSD
-		summary.DayChangeAbsEUR += hq.DayGainAbsEUR
-		summary.DayChangeAbsUSD += hq.DayGainAbsUSD
-		summary.TotalGainAbsEUR += hq.TotalGainAbsEUR
-		summary.TotalGainAbsUSD += hq.TotalGainAbsUSD
-		totalCostUSD += hq.TotalCostUSD
-		
+		cost, estimated, costErr := portfolioPositionCost(trades, rates)
+		position := models.Holding{
+			ID:                    trades[0].ID,
+			Symbol:                trades[0].Symbol,
+			Shares:                shares,
+			PurchasePriceCurrency: "USD",
+		}
+		if costErr == nil {
+			position.PurchasePrice, _ = cost.AverageCost.Float64()
+		}
+
+		positions = append(positions, position)
+		costs = append(costs, cost)
+		costErrors = append(costErrors, costErr)
+		estimates = append(estimates, estimated)
 	}
 
-	prevTotalUSD := summary.TotalValueUSD - summary.DayChangeAbsUSD
-	if prevTotalUSD > 0 {
-		summary.DayChangePercent = summary.DayChangeAbsUSD / prevTotalUSD * 100
+	results := processHoldingQuotes(positions)
+	summary := models.PortfolioSummary{Holdings: results}
+	var totalCostUSD float64
+
+	for i := range results {
+		row := &results[i]
+		trades := groups[i]
+		row.Transactions = make([]models.PortfolioTradeView, 0, len(trades))
+		row.EstimatedCostBasis = estimates[i]
+		summary.EstimatedCostBasis = summary.EstimatedCostBasis || estimates[i]
+
+		for j := len(trades) - 1; j >= 0; j-- {
+			trade := trades[j]
+			view := models.PortfolioTradeView{
+				ID:        trade.ID,
+				Side:      portfolioTradeSide(trade),
+				Date:      portfolioTradeDay(trade),
+				Shares:    trade.Shares,
+				UnitPrice: trade.PurchasePrice,
+				Currency:  portfolioTradeCurrency(trade),
+			}
+			if gain := costs[i].RealizedByTrade[trade.ID]; gain != nil {
+				amount, _ := gain.Float64()
+				view.RealizedGainAbsUSD = &amount
+			}
+			row.Transactions = append(row.Transactions, view)
+		}
+
+		summary.TotalValueEUR += row.MarketValueEUR
+		summary.TotalValueUSD += row.MarketValueUSD
+		summary.DayChangeAbsEUR += row.DayGainAbsEUR
+		summary.DayChangeAbsUSD += row.DayGainAbsUSD
+
+		if costErrors[i] != nil {
+			row.CostBasisError = costErrors[i].Error()
+			row.TotalGainAbsUSD = 0
+			row.TotalGainAbsEUR = 0
+			row.TotalGainPercent = 0
+			summary.CostBasisIncomplete = true
+			continue
+		}
+
+		realized, _ := costs[i].RealizedGain.Float64()
+		row.RealizedGainAbsUSD = &realized
+		summary.RealizedGainAbsUSD += realized
+
+		if row.Shares == 0 {
+			continue
+		}
+		if row.QuoteFetchError != "" {
+			summary.CostBasisIncomplete = true
+			continue
+		}
+
+		summary.TotalGainAbsEUR += row.TotalGainAbsEUR
+		summary.TotalGainAbsUSD += row.TotalGainAbsUSD
+		totalCostUSD += row.TotalCostUSD
+	}
+
+	previousValueUSD := summary.TotalValueUSD - summary.DayChangeAbsUSD
+	if previousValueUSD > 0 {
+		summary.DayChangePercent = summary.DayChangeAbsUSD / previousValueUSD * 100
 	}
 	if totalCostUSD > 0 {
 		summary.TotalGainPercent = summary.TotalGainAbsUSD / totalCostUSD * 100
 	}
 
-	database.PortfolioDB.FirstOrCreate(&settings, models.PortfolioSettings{ID: 1})
+	var settings models.PortfolioSettings
+	if err := db.FirstOrCreate(&settings, models.PortfolioSettings{ID: 1}).Error; err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not load portfolio settings"})
+		return
+	}
 	summary.BuyingPower = settings.BuyingPower
 
 	c.JSON(http.StatusOK, summary)
@@ -139,13 +270,17 @@ func buildHoldingQuote(h models.Holding) models.HoldingQuote {
 		return hq
 	}
 
+	priceUSDRate := fxOrOne(q.Currency, "USD")
+	priceEURRate := fxOrOne(q.Currency, "EUR")
+	if q.Currency == "" || priceUSDRate <= 0 || priceEURRate <= 0 {
+		hq.QuoteFetchError = "Quote currency or exchange rate unavailable"
+		return hq
+	}
+
 	hq.Currency = q.Currency
 	hq.LastPrice = q.Price
 	hq.MarketSession = q.MarketSession
 	hq.MarketValue = q.Price * h.Shares
-
-	priceUSDRate := fxOrOne(q.Currency, "USD")
-	priceEURRate := fxOrOne(q.Currency, "EUR")
 	hq.LastPriceUSD = q.Price * priceUSDRate
 	hq.LastPriceEUR = q.Price * priceEURRate
 	hq.MarketValueUSD = hq.MarketValue * priceUSDRate
@@ -158,9 +293,9 @@ func buildHoldingQuote(h models.Holding) models.HoldingQuote {
 		hq.DayGainAbsEUR = hq.DayGainAbs * priceEURRate
 	}
 
+	hq.TotalGainAbsUSD = hq.MarketValueUSD - hq.TotalCostUSD
+	hq.TotalGainAbsEUR = hq.MarketValueEUR - hq.TotalCostEUR
 	if hq.TotalCostUSD > 0 {
-		hq.TotalGainAbsUSD = hq.MarketValueUSD - hq.TotalCostUSD
-		hq.TotalGainAbsEUR = hq.MarketValueEUR - hq.TotalCostEUR
 		hq.TotalGainPercent = hq.TotalGainAbsUSD / hq.TotalCostUSD * 100
 	}
 
@@ -247,11 +382,31 @@ func processHoldingQuotes(
 func GetPortfolioHistory(c *gin.Context) {
 	empty := models.PortfolioHistory{USD: []models.PortfolioPoint{}, EUR: []models.PortfolioPoint{}}
 
-	var holdings []models.Holding
-	if err := database.PortfolioDB.Find(&holdings).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		groups, err := portfolioTradeGroups(
+		database.PortfolioDB.WithContext(c.Request.Context()),
+	)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Could not load portfolio trades"})
 		return
 	}
+
+	holdings := make([]models.Holding, 0, len(groups))
+	for _, trades := range groups {
+		shares, err := portfolioShareBalance(trades, "")
+		if err != nil {
+			c.Error(err)
+			c.JSON(http.StatusConflict, gin.H{"error": "Portfolio contains an invalid trade history"})
+			return
+		}
+		if shares > 0 {
+			holdings = append(holdings, models.Holding{
+				Symbol: trades[0].Symbol,
+				Shares: shares,
+			})
+		}
+	}
+	
 	if len(holdings) == 0 {
 		c.JSON(http.StatusOK, empty)
 		return
@@ -339,7 +494,6 @@ func GetPortfolioHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, models.PortfolioHistory{USD: usdPoints, EUR: eurPoints})
 }
 
-
 // GetBuyingPower handles GET /api/portfolio/buying-power
 func GetBuyingPower(c *gin.Context) {
 	var settings models.PortfolioSettings
@@ -371,4 +525,3 @@ func UpdateBuyingPower(c *gin.Context) {
 
 	c.JSON(http.StatusOK, settings)
 }
-

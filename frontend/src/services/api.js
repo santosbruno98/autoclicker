@@ -85,6 +85,9 @@ export const updateThreshold = async (id, payload) =>
 export const deleteThreshold = async (id) =>
   (await API.delete(`/portfolio/thresholds/${id}`)).data;
 
+export const createPortfolioTrade = async (payload) =>
+  (await API.post('/portfolio/transactions', payload)).data;
+
 export const processMarketDocument = async (file) => {
   const formData = new FormData();
   formData.append('file', file);
@@ -149,3 +152,4 @@ export const verifyRouteAddress = async (address) =>
   (await API.post('/routes/verify-address', { address }, {
     timeout: 30_000,
   })).data;
+

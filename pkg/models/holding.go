@@ -17,6 +17,20 @@ type Holding struct {
 	PurchaseDate          *time.Time `json:"purchase_date"`
 	CreatedAt             time.Time  `gorm:"default:CURRENT_TIMESTAMP" json:"created_at"`
 	UpdatedAt             time.Time  `gorm:"default:CURRENT_TIMESTAMP" json:"updated_at"`
+	Side                  TradeSide  `gorm:"type:varchar(4);not null;default:buy" json:"-"`
+	TradeRequestID        *string    `gorm:"type:varchar(36);uniqueIndex" json:"-"`
+	// Reporting rate captured when a new non-USD trade is recorded.
+	USDPerCurrencyUnit string `gorm:"type:varchar(32);not null;default:''" json:"-"`
+}
+
+type PortfolioTradeView struct {
+	ID                 uint      `json:"id"`
+	Side               TradeSide `json:"side"`
+	Date               string    `json:"date"`
+	Shares             float64   `json:"shares"`
+	UnitPrice          float64   `json:"unit_price"`
+	Currency           string    `json:"currency"`
+	RealizedGainAbsUSD *float64  `json:"realized_gain_abs_usd,omitempty"`
 }
 
 type HoldingQuote struct {
@@ -47,6 +61,11 @@ type HoldingQuote struct {
 	TotalGainAbsEUR float64 `json:"total_gain_abs_eur"`
 
 	QuoteFetchError string `json:"quote_fetch_error,omitempty"`
+
+	Transactions       []PortfolioTradeView `json:"transactions"`
+	RealizedGainAbsUSD *float64             `json:"realized_gain_abs_usd,omitempty"`
+	CostBasisError     string               `json:"cost_basis_error,omitempty"`
+	EstimatedCostBasis bool                 `json:"estimated_cost_basis,omitempty"`
 }
 
 // PortfolioPoint represents a single point in time in the portfolio's value history
@@ -77,5 +96,8 @@ type PortfolioSummary struct {
 	TotalGainPercent float64 `json:"total_gain_percent"`
 	BuyingPower      float64 `json:"buying_power"`
 
-	Holdings []HoldingQuote `json:"holdings"`
+	Holdings            []HoldingQuote `json:"holdings"`
+	RealizedGainAbsUSD  float64        `json:"realized_gain_abs_usd"`
+	CostBasisIncomplete bool           `json:"cost_basis_incomplete"`
+	EstimatedCostBasis  bool           `json:"estimated_cost_basis"`
 }

@@ -115,6 +115,7 @@ func main() {
 		api.GET("/portfolio/history", handlers.GetPortfolioHistory)
 		api.GET("/portfolio/buyingPower", handlers.GetBuyingPower)
 		api.PUT("/portfolio/buyingPower", handlers.UpdateBuyingPower)
+		api.POST("/portfolio/transactions", handlers.CreatePortfolioTrade)
 
 		// Dividend APIs
 

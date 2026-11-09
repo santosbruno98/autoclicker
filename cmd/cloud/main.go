@@ -87,6 +87,7 @@ func main() {
 		api.POST("/portfolio/holdings", handlers.CreateHolding)
 		api.PUT("/portfolio/holdings/:id", handlers.UpdateHolding)
 		api.DELETE("/portfolio/holdings/:id", handlers.DeleteHolding)
+		api.POST("/portfolio/transactions", handlers.CreatePortfolioTrade)
 
 		api.GET("/portfolio/summary", handlers.GetPortfolioSummary)
 		api.GET("/portfolio/history", handlers.GetPortfolioHistory)
