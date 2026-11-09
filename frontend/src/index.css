@@ -1,4 +1,3 @@
-
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 @tailwind base;
@@ -7,9 +6,48 @@
 
 :root {
   color-scheme: dark;
+
+  --app-bg: #090f1c;
+  --app-sidebar: #101a2c;
+  --app-header: rgb(9 15 28 / 95%);
+  --app-card: #131f32;
+  --app-input: #0c1626;
+  --app-raised: #1e293b;
+  --app-text: #e2e8f0;
+  --app-strong: #ffffff;
+  --app-muted: #94a3b8;
+  --app-border: rgb(255 255 255 / 10%);
+  --app-subtle: rgb(255 255 255 / 5%);
+  --app-hover: rgb(255 255 255 / 10%);
+  --app-accent: #22d3ee;
+  --app-accent-border: #0891b2;
+  --app-accent-tint: rgb(34 211 238 / 10%);
+  --app-scrollbar: #334155;
+
   font-family: 'Inter', sans-serif;
-  background: #090f1c;
-  color: #e2e8f0;
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --app-bg: #eef3fa;
+  --app-sidebar: #f8fafc;
+  --app-header: rgb(248 250 252 / 95%);
+  --app-card: #ffffff;
+  --app-input: #f8fafc;
+  --app-raised: #e2e8f0;
+  --app-text: #1e293b;
+  --app-strong: #0f172a;
+  --app-muted: #475569;
+  --app-border: #cbd5e1;
+  --app-subtle: rgb(15 23 42 / 4%);
+  --app-hover: rgb(15 23 42 / 8%);
+  --app-accent: #0e7490;
+  --app-accent-border: #0e7490;
+  --app-accent-tint: rgb(8 145 178 / 10%);
+  --app-scrollbar: #94a3b8;
 }
 
 * {
@@ -23,7 +61,7 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
-  background: #090f1c;
+  background: var(--app-bg);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -43,20 +81,74 @@ button:disabled {
   opacity: 0.5;
 }
 
+.app-shell {
+  background: var(--app-bg);
+  color: var(--app-text);
+}
+
+.app-sidebar {
+  background: var(--app-sidebar);
+}
+
+.app-header {
+  background: var(--app-header);
+}
+
+.app-widget-surface {
+  background: var(--app-input);
+}
+
+.theme-option {
+  border-color: var(--app-border);
+  background: var(--app-input);
+}
+
+.theme-option:hover {
+  background: var(--app-subtle);
+}
+
+.theme-option.theme-option-selected {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-tint);
+}
+
+.theme-option:focus-within {
+  outline: 2px solid var(--app-accent-border);
+  outline-offset: 2px;
+}
+
+.theme-option input {
+  accent-color: var(--app-accent-border);
+}
+
 @layer components {
   .terminal-card {
-    @apply rounded-2xl border border-white/10 bg-[#131f32];
+    @apply rounded-2xl border;
+    border-color: var(--app-border);
+    background: var(--app-card);
   }
 
   .terminal-input {
-    @apply block w-full min-w-0 rounded-lg border border-white/10
-      bg-[#0c1626] px-3 py-2.5 text-sm text-white outline-none
-      transition focus:border-cyan-500/60 focus:ring-1
-      focus:ring-cyan-500/30;
+    @apply block w-full min-w-0 rounded-lg border px-3 py-2.5 text-sm outline-none
+      transition focus:ring-1;
+    border-color: var(--app-border);
+    background: var(--app-input);
+    color: var(--app-strong);
+  }
+
+  .terminal-input::placeholder {
+    color: var(--app-muted);
+    opacity: 1;
+  }
+
+  .terminal-input:focus {
+    border-color: var(--app-accent-border);
+    --tw-ring-color: var(--app-accent-tint);
   }
 
   .terminal-label {
-    @apply flex min-w-0 flex-col gap-2 text-xs font-medium text-slate-400;
+    @apply flex min-w-0 flex-col gap-2 text-xs font-medium;
+    color: var(--app-muted);
   }
 
   .terminal-button {
@@ -67,26 +159,37 @@ button:disabled {
 
   .terminal-button-secondary {
     @apply inline-flex items-center justify-center gap-2 rounded-lg
-      border border-white/10 bg-white/5 px-4 py-2.5 text-sm
-      font-medium text-slate-200 transition hover:bg-white/10;
+      border px-4 py-2.5 text-sm font-medium transition;
+    border-color: var(--app-border);
+    background: var(--app-subtle);
+    color: var(--app-text);
+  }
+
+  .terminal-button-secondary:hover {
+    background: var(--app-hover);
   }
 
   .terminal-chip {
-    @apply inline-flex items-center rounded-full border border-white/10
-      bg-white/5 px-2.5 py-1 text-xs text-slate-300;
+    @apply inline-flex items-center rounded-full border px-2.5 py-1 text-xs;
+    border-color: var(--app-border);
+    background: var(--app-subtle);
+    color: var(--app-text);
   }
 
   .terminal-stat {
-    @apply flex flex-col gap-2 rounded-xl border border-white/10
-      bg-[#0c1626] p-3;
+    @apply flex flex-col gap-2 rounded-xl border p-3;
+    border-color: var(--app-border);
+    background: var(--app-input);
   }
 
   .terminal-stat span {
-    @apply text-xs text-slate-500;
+    @apply text-xs;
+    color: var(--app-muted);
   }
 
   .terminal-stat strong {
-    @apply text-sm font-semibold text-white;
+    @apply text-sm font-semibold;
+    color: var(--app-strong);
   }
 
   .terminal-table {
@@ -94,20 +197,179 @@ button:disabled {
   }
 
   .terminal-table thead {
-    @apply bg-white/[0.03] text-xs uppercase tracking-wide text-slate-500;
+    @apply text-xs uppercase tracking-wide;
+    background: var(--app-subtle);
+    color: var(--app-muted);
   }
 
   .terminal-table th {
-    @apply whitespace-nowrap border-b border-white/10 px-4 py-3 font-semibold;
+    @apply whitespace-nowrap border-b px-4 py-3 font-semibold;
+    border-color: var(--app-border);
   }
 
   .terminal-table td {
-    @apply border-b border-white/5 px-4 py-4 text-slate-300;
+    @apply border-b px-4 py-4;
+    border-color: var(--app-border);
+    color: var(--app-text);
   }
 
   .terminal-table tbody tr {
-    @apply transition hover:bg-white/[0.03];
+    @apply transition;
   }
+
+  .terminal-table tbody tr:hover {
+    background: var(--app-subtle);
+  }
+}
+
+/* Theme the existing screens that still use fixed Tailwind colors. */
+:root[data-theme='light'] :is(
+  .bg-slate-950,
+  [class~='bg-[#090f1c]']
+) {
+  background-color: var(--app-bg);
+}
+
+:root[data-theme='light'] :is(
+  .bg-slate-900,
+  [class~='bg-[#101a2c]'],
+  [class~='bg-[#131f32]']
+) {
+  background-color: var(--app-card);
+}
+
+:root[data-theme='light'] :is(
+  .bg-slate-800,
+  [class~='bg-slate-800/50'],
+  [class~='bg-[#0c1626]']
+) {
+  background-color: var(--app-input);
+}
+
+:root[data-theme='light'] :is(
+  .bg-slate-700,
+  [class~='hover:bg-slate-600']:hover,
+  [class~='hover:bg-slate-800/30']:hover
+) {
+  background-color: var(--app-raised);
+}
+
+:root[data-theme='light'] :is(
+  [class~='bg-white/5'],
+  [class~='bg-white/[0.03]']
+) {
+  background-color: var(--app-subtle);
+}
+
+:root[data-theme='light'] :is(
+  [class~='hover:bg-white/5']:hover,
+  [class~='hover:bg-white/10']:hover,
+  [class~='hover:bg-white/[0.03]']:hover
+) {
+  background-color: var(--app-hover);
+}
+
+:root[data-theme='light'] :is(
+  .border-slate-700,
+  .border-slate-800,
+  .border-gray-800,
+  [class~='border-slate-800/50'],
+  [class~='border-white/5'],
+  [class~='border-white/10'],
+  [class~='border-white/15']
+) {
+  border-color: var(--app-border);
+}
+
+:root[data-theme='light'] :is(.text-white, .text-slate-100, [class~='hover:text-white']:hover) {
+  color: var(--app-strong);
+}
+
+:root[data-theme='light'] :is(.text-slate-200, .text-slate-300) {
+  color: var(--app-text);
+}
+
+:root[data-theme='light'] :is(.text-slate-400, .text-slate-500, .text-slate-600) {
+  color: var(--app-muted);
+}
+
+:root[data-theme='light'] :is(.bg-blue-600, .bg-indigo-600).text-white {
+  color: #ffffff;
+}
+
+:root[data-theme='light'] :is(
+  .text-cyan-200,
+  .text-cyan-300,
+  .text-cyan-400,
+  [class~='hover:text-cyan-300']:hover
+) {
+  color: var(--app-accent);
+}
+
+:root[data-theme='light'] :is(.text-emerald-300, .text-emerald-400) {
+  color: #047857;
+}
+
+:root[data-theme='light'] :is(
+  .text-red-300,
+  .text-red-400,
+  .text-rose-300,
+  .text-rose-400,
+  [class~='hover:text-red-300']:hover
+) {
+  color: #b91c1c;
+}
+
+:root[data-theme='light'] :is(
+  .text-amber-200,
+  .text-amber-300,
+  .text-amber-400,
+  [class~='hover:text-amber-300']:hover
+) {
+  color: #92400e;
+}
+
+:root[data-theme='light'] [class~='bg-amber-950/30'] {
+  background-color: #fef3c7;
+}
+
+:root[data-theme='light'] :is(.text-indigo-400, .text-indigo-500) {
+  color: #4338ca;
+}
+
+:root[data-theme='light'] .text-violet-400 {
+  color: #6d28d9;
+}
+
+/* Recharts supplies some colors as SVG attributes and inline styles. */
+:root[data-theme='light'] .recharts-cartesian-axis-tick-value {
+  fill: var(--app-muted);
+}
+
+:root[data-theme='light'] .recharts-cartesian-axis line {
+  stroke: var(--app-scrollbar);
+}
+
+:root[data-theme='light'] .recharts-cartesian-grid line {
+  stroke: var(--app-scrollbar);
+}
+
+:root[data-theme='light'] .recharts-line-curve[stroke='#22d3ee'] {
+  stroke: #0e7490;
+}
+
+:root[data-theme='light'] .recharts-line-curve[stroke='#fbbf24'] {
+  stroke: #92400e;
+}
+
+:root[data-theme='light'] .recharts-default-tooltip {
+  background-color: var(--app-card) !important;
+  border-color: var(--app-border) !important;
+  color: var(--app-strong) !important;
+}
+
+:root[data-theme='light'] :is(.recharts-tooltip-item, .recharts-legend-item-text) {
+  color: var(--app-text) !important;
 }
 
 @keyframes pulse-signal {
@@ -115,6 +377,7 @@ button:disabled {
     opacity: 0.3;
     transform: scaleY(0.4);
   }
+
   50% {
     opacity: 1;
     transform: scaleY(1);
@@ -131,6 +394,6 @@ button:disabled {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: var(--app-scrollbar);
   border-radius: 8px;
 }

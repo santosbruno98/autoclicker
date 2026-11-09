@@ -1,45 +1,57 @@
 import React, { useEffect, useRef } from 'react';
 
-export const MarketHeatmap = () => {
+import { useTheme } from './ThemeSettings';
+
+export function MarketHeatmap() {
+  const { theme } = useTheme();
   const containerRef = useRef(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return undefined;
 
-    // Clear previous elements to avoid duplicate rendering
-    containerRef.current.innerHTML = '';
+    const widget = document.createElement('div');
+    widget.className = 'tradingview-widget-container__widget';
+    widget.style.height = '100%';
+    widget.style.width = '100%';
 
     const script = document.createElement('script');
-    script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-stock-heatmap.js';
+    script.src =
+      'https://s3.tradingview.com/external-embedding/embed-widget-stock-heatmap.js';
     script.type = 'text/javascript';
     script.async = true;
-    script.innerHTML = JSON.stringify({
+    script.textContent = JSON.stringify({
       exchanges: [],
-      dataSource: "SPX500",
-      grouping: "sector",
-      blockSize: "market_cap_basic",
-      blockColor: "change",
-      locale: "en",
-      symbolUrl: "",
-      colorTheme: "dark",
+      dataSource: 'SPX500',
+      grouping: 'sector',
+      blockSize: 'market_cap_basic',
+      blockColor: 'change',
+      locale: 'en',
+      symbolUrl: '',
+      colorTheme: theme,
       hasTopBar: true,
       isDataSetEnabled: true,
       isZoomEnabled: true,
       hasSymbolTooltip: true,
-      width: "100%",
-      height: "100%"
+      width: '100%',
+      height: '100%',
     });
 
-    containerRef.current.appendChild(script);
-  }, []);
+    container.replaceChildren(widget, script);
+
+    return () => {
+      container.replaceChildren();
+    };
+  }, [theme]);
 
   return (
-    <div className="w-full h-[800px] bg-[#131722] rounded-lg overflow-hidden border border-gray-800">
-      <div className="tradingview-widget-container h-full w-full" ref={containerRef}>
-        <div className="tradingview-widget-container__widget h-full w-full"></div>
-      </div>
+    <div className="app-widget-surface h-[800px] w-full overflow-hidden rounded-lg border border-gray-800">
+      <div
+        className="tradingview-widget-container h-full w-full"
+        ref={containerRef}
+      />
     </div>
   );
-};
+}
 
 export default MarketHeatmap;

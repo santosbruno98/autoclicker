@@ -1,18 +1,18 @@
-
 import React, { useEffect, useRef } from 'react';
 import { ExternalLink } from 'lucide-react';
+
+import { useTheme } from './ThemeSettings';
 
 export default function TradingViewTechnicalChart({
   symbol = 'NASDAQ:NVDA',
   height = 620,
 }) {
+  const { theme } = useTheme();
   const containerRef = useRef(null);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
-
-    container.innerHTML = '';
 
     const widget = document.createElement('div');
     widget.className = 'tradingview-widget-container__widget';
@@ -25,12 +25,12 @@ export default function TradingViewTechnicalChart({
     script.type = 'text/javascript';
     script.async = true;
 
-    script.innerHTML = JSON.stringify({
+    script.textContent = JSON.stringify({
       autosize: true,
       symbol,
       interval: 'D',
       timezone: 'Etc/UTC',
-      theme: 'dark',
+      theme,
       style: '1',
       locale: 'en',
       allow_symbol_change: true,
@@ -48,13 +48,12 @@ export default function TradingViewTechnicalChart({
       popup_height: '700',
     });
 
-    container.appendChild(widget);
-    container.appendChild(script);
+    container.replaceChildren(widget, script);
 
     return () => {
-      container.innerHTML = '';
+      container.replaceChildren();
     };
-  }, [symbol]);
+  }, [symbol, theme]);
 
   return (
     <section className="terminal-card overflow-hidden">
@@ -80,7 +79,7 @@ export default function TradingViewTechnicalChart({
       </div>
 
       <div
-        className="tradingview-widget-container"
+        className="tradingview-widget-container app-widget-surface"
         ref={containerRef}
         style={{ height, width: '100%' }}
       />
