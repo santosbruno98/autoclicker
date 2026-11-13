@@ -85,9 +85,8 @@ function readPalette() {
     return Object.fromEntries(
       Object.entries(graphite).map(([name, fallback]) => {
         const color = saved?.[name];
-        return [name, typeof color === 'string' && HEX_COLOR.test(color)
-          ? color.toUpperCase()
-          : fallback];
+        const valid = typeof color === 'string' && HEX_COLOR.test(color);
+        return [name, valid ? color.toUpperCase() : fallback];
       })
     );
   } catch {
@@ -99,7 +98,7 @@ function writePreference(key, value) {
   try {
     window.localStorage.setItem(key, value);
   } catch {
-    // Keep theme controls usable when browser storage is unavailable.
+    // Changes still apply for this session if browser storage is unavailable.
   }
 }
 
@@ -163,6 +162,10 @@ export function ThemeProvider({ children }) {
     };
   }, [activePalette, preference, theme]);
 
+  useLayoutEffect(() => {
+    writePreference(PALETTE_KEY, JSON.stringify(palette));
+  }, [palette]);
+
   function chooseTheme(value) {
     setPreference(value);
     writePreference(THEME_KEY, value);
@@ -171,14 +174,16 @@ export function ThemeProvider({ children }) {
   function updateColor(name, value) {
     if (!Object.hasOwn(graphite, name) || !HEX_COLOR.test(value)) return;
 
-    const next = { ...palette, [name]: value.toUpperCase() };
-    setPalette(next);
-    writePreference(PALETTE_KEY, JSON.stringify(next));
+    setPalette((current) => ({
+      ...current,
+      [name]: value.toUpperCase(),
+    }));
+    chooseTheme('custom');
   }
 
   function resetPalette() {
     setPalette({ ...graphite });
-    writePreference(PALETTE_KEY, JSON.stringify(graphite));
+    chooseTheme('custom');
   }
 
   return (
@@ -205,11 +210,16 @@ function ColorControl({ name, label, value, onChange }) {
   const [draft, setDraft] = useState(null);
   const id = `color-${name.slice(2)}`;
 
-  function commit(event) {
-    const input = event.currentTarget.value.trim();
+  function commit() {
+    if (draft === null) return;
+
+    const input = draft.trim();
     const color = input.startsWith('#') ? input : `#${input}`;
 
-    if (HEX_COLOR.test(color)) onChange(name, color);
+    if (HEX_COLOR.test(color)) {
+      onChange(name, color);
+    }
+
     setDraft(null);
   }
 
@@ -240,7 +250,10 @@ function ColorControl({ name, label, value, onChange }) {
           onChange={(event) => setDraft(event.target.value)}
           onBlur={commit}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') event.currentTarget.blur();
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              event.currentTarget.blur();
+            }
           }}
         />
       </div>
@@ -300,41 +313,40 @@ function AppearanceSettings() {
         </p>
       )}
 
-      {preference === 'custom' && (
-        <div className="space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <p className="text-sm text-slate-400">
-              Colors are saved in this browser. Press Enter to apply a hex value.
-            </p>
-            <button
-              type="button"
-              className="terminal-button-secondary"
-              onClick={resetPalette}
-            >
-              Reset to Graphite
-            </button>
-          </div>
-
-          {colorGroups.map(({ label, fields }) => (
-            <fieldset key={label} className="rounded-xl border border-white/10 p-4">
-              <legend className="px-2 text-sm font-semibold text-white">
-                {label}
-              </legend>
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {fields.map(([name, fieldLabel]) => (
-                  <ColorControl
-                    key={name}
-                    name={name}
-                    label={fieldLabel}
-                    value={palette[name]}
-                    onChange={updateColor}
-                  />
-                ))}
-              </div>
-            </fieldset>
-          ))}
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-slate-400">
+            Edit your saved custom palette below. Changing a color activates Custom.
+            Press Enter to apply a hex value.
+          </p>
+          <button
+            type="button"
+            className="terminal-button-secondary"
+            onClick={resetPalette}
+          >
+            Reset to Graphite
+          </button>
         </div>
-      )}
+
+        {colorGroups.map(({ label, fields }) => (
+          <fieldset key={label} className="rounded-xl border border-white/10 p-4">
+            <legend className="px-2 text-sm font-semibold text-white">
+              {label}
+            </legend>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {fields.map(([name, fieldLabel]) => (
+                <ColorControl
+                  key={name}
+                  name={name}
+                  label={fieldLabel}
+                  value={palette[name]}
+                  onChange={updateColor}
+                />
+              ))}
+            </div>
+          </fieldset>
+        ))}
+      </div>
     </section>
   );
 }
