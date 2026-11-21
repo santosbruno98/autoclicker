@@ -1,10 +1,38 @@
-import React, { useRef, useState } from 'react';
-import { API } from '../services/http';
+import React, { useEffect, useRef, useState } from 'react';
 
-function messageOf(error) {
-  return error?.response?.data?.error ||
+import RouteAreaPicker, {
+  polygonCorners,
+  validateAreaPolygon,
+} from './RouteAreaPicker';
+
+function savedPolygon(settings) {
+  const polygon = settings?.area?.polygon;
+
+  return polygonCorners(polygon) ? polygon : null;
+}
+
+function defaultLabel(settings) {
+  return settings?.area?.type === 'polygon'
+    ? settings.area.label || 'Delivery area'
+    : 'Delivery area';
+}
+
+function errorMessage(error) {
+  const message = error?.response?.data?.error ||
     error?.message ||
-    'Request failed';
+    'Cannot save the selected area.';
+
+  if (
+    error?.response?.status === 404 ||
+    error?.response?.status === 405
+  ) {
+    return (
+      'The polygon-settings backend has not been deployed yet. ' +
+      'Your draft has not been saved.'
+    );
+  }
+
+  return message;
 }
 
 export default function RoutePlannerSettings({
@@ -14,197 +42,243 @@ export default function RoutePlannerSettings({
   onApply,
   onReload,
 }) {
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState([]);
-  const [selected, setSelected] = useState(null);
-  const [searching, setSearching] = useState(false);
-  const [searched, setSearched] = useState(false);
+  const [polygon, setPolygon] = useState(() =>
+    savedPolygon(settings)
+  );
+
+  const [label, setLabel] = useState(() =>
+    defaultLabel(settings)
+  );
+
+  const [dirty, setDirty] = useState(false);
   const [error, setError] = useState('');
-  const searchVersion = useRef(0);
+  const [notice, setNotice] = useState('');
+  const [pickerVersion, setPickerVersion] = useState(0);
 
-  async function search(event) {
-    event.preventDefault();
+  const previousRevision = useRef(
+    settings?.revision ?? null
+  );
 
-    const text = query.trim();
-    if (text.length < 3 || !online || busy || searching) return;
+  const revision = settings?.revision ?? null;
 
-    const version = ++searchVersion.current;
-    setSearching(true);
+  useEffect(() => {
+    if (previousRevision.current === revision) return;
+
+    previousRevision.current = revision;
+
+    setPolygon(savedPolygon(settings));
+    setLabel(defaultLabel(settings));
+    setDirty(false);
     setError('');
-    setSelected(null);
-    setResults([]);
-    setSearched(false);
+    setNotice('');
+    setPickerVersion((previous) => previous + 1);
+  }, [revision, settings]);
+
+  function changePolygon(next) {
+    setPolygon(next);
+    setDirty(true);
+    setError('');
+    setNotice('');
+  }
+
+  function restoreSaved() {
+    setPolygon(savedPolygon(settings));
+    setLabel(defaultLabel(settings));
+    setDirty(false);
+    setError('');
+    setNotice('');
+    setPickerVersion((previous) => previous + 1);
+  }
+
+  async function save() {
+    setError('');
+    setNotice('');
+
+    const validationError = validateAreaPolygon(polygon);
+
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    const areaLabel = label.trim();
+
+    if (!areaLabel || areaLabel.length > 100) {
+      setError('Enter an area name between 1 and 100 characters.');
+      return;
+    }
 
     try {
-      const { data } = await API.get('/route-planner/areas', {
-        params: { q: text },
-        timeout: 30000,
+      await onApply({
+        label: areaLabel,
+        polygon,
       });
 
-      if (version !== searchVersion.current) return;
-
-      if (!Array.isArray(data.results)) {
-        throw new Error('The updated route-settings backend is required.');
-      }
-
-      setResults(data.results);
-      setSearched(true);
+      setDirty(false);
+      setNotice('Delivery area saved.');
     } catch (failure) {
-      if (version === searchVersion.current) {
-        setError(messageOf(failure));
-      }
-    } finally {
-      if (version === searchVersion.current) {
-        setSearching(false);
-      }
+      setError(errorMessage(failure));
     }
   }
 
-  async function apply() {
-    if (!selected || busy || !online) return;
+  async function reload() {
+    if (dirty) {
+      setError(
+        'Restore the saved area before reloading, or save your draft first.'
+      );
+      return;
+    }
 
     setError('');
-
-    try {
-      await onApply(selected.selection_token);
-      setSelected(null);
-      setResults([]);
-      setSearched(false);
-    } catch (failure) {
-      setError(messageOf(failure));
-    }
+    setNotice('');
+    await onReload();
   }
+
+  const validationError = polygon
+    ? validateAreaPolygon(polygon)
+    : '';
+
+  const initialCenter = settings?.area
+    ? {
+        latitude: settings.area.latitude,
+        longitude: settings.area.longitude,
+      }
+    : null;
 
   return (
     <section className="terminal-card space-y-5 p-4 md:p-6">
       <div>
-        <h2 className="text-lg font-semibold">Route Planner Settings</h2>
+        <h2 className="text-lg font-semibold">
+          Route Planner Settings
+        </h2>
+
         <p className="mt-2 text-sm text-slate-400">
-          Restrict address lookup and route destinations to a selected
-          geographic boundary in Portugal.
+          Define your delivery area using four draggable corners.
+          Address searches and delivery destinations will be restricted
+          to the saved outline.
         </p>
       </div>
 
       <div className="rounded-xl border border-white/15 p-4">
-        <p className="text-sm text-slate-400">Active search area</p>
-        <p className="mt-1 font-semibold">
-          {settings?.area?.label || 'No geographic area selected'}
+        <p className="text-sm text-slate-400">
+          Currently saved area
         </p>
-        {settings?.area && (
-          <p className="mt-1 text-sm text-slate-400">
-            Boundary type: {settings.area.level}
-          </p>
-        )}
+
+        <p className="mt-1 font-semibold">
+          {settings?.area?.label || 'No delivery area saved'}
+        </p>
+
+        {settings?.area &&
+          settings.area.type !== 'polygon' && (
+            <p className="mt-2 text-sm text-amber-200">
+              The current selection is an administrative boundary.
+              Draw and save a polygon to replace it.
+            </p>
+          )}
       </div>
 
-      <form onSubmit={search} className="space-y-3">
-        <label htmlFor="route-area-query" className="block font-medium">
-          Search district, municipality or postcode area
+      <div className="space-y-2">
+        <label
+          htmlFor="route-polygon-label"
+          className="block font-medium"
+        >
+          Area name
         </label>
 
-        <div className="flex flex-col gap-3 sm:flex-row">
-          <input
-            id="route-area-query"
-            type="search"
-            value={query}
-            maxLength={200}
-            placeholder="For example: Distrito da Guarda, Portugal"
-            autoComplete="off"
-            disabled={busy || searching}
-            className="terminal-input min-w-0 flex-1"
-            onChange={(event) => {
-              setQuery(event.target.value);
-              setSelected(null);
-              setResults([]);
-              setSearched(false);
-            }}
-          />
+        <input
+          id="route-polygon-label"
+          type="text"
+          maxLength={100}
+          value={label}
+          disabled={busy}
+          className="terminal-input w-full"
+          placeholder="For example: My delivery area"
+          onChange={(event) => {
+            setLabel(event.target.value);
+            setDirty(true);
+            setError('');
+            setNotice('');
+          }}
+        />
+      </div>
 
-          <button
-            type="submit"
-            className="terminal-button"
-            disabled={
-              !online || busy || searching || query.trim().length < 3
-            }
-          >
-            {searching ? 'Searching…' : 'Search areas'}
-          </button>
-        </div>
-      </form>
+      <RouteAreaPicker
+        key={pickerVersion}
+        value={polygon}
+        initialCenter={initialCenter}
+        disabled={busy}
+        onChange={changePolygon}
+      />
 
-      {searched && results.length === 0 && (
+      {dirty && (
         <p role="status" className="text-sm text-amber-200">
-          No supported boundary was returned. Try the full district or
-          municipality name. Settlement points without a boundary are
-          not offered.
+          Unsaved draft. The previously saved area remains active.
         </p>
       )}
 
-      {results.length > 0 && (
-        <fieldset className="space-y-3">
-          <legend className="mb-3 font-medium">Choose the boundary</legend>
+      <p className="text-sm text-slate-400">
+        Saving a different area preserves extracted services and
+        historical journeys. Addresses must pass the new area and road
+        checks before they can be routed again.
+      </p>
 
-          {results.map((area) => (
-            <label
-              key={area.place_id}
-              className="flex cursor-pointer items-start gap-3 rounded-xl border border-white/15 p-4"
-            >
-              <input
-                type="radio"
-                name="route-area"
-                value={area.place_id}
-                checked={selected?.place_id === area.place_id}
-                disabled={busy}
-                onChange={() => setSelected(area)}
-                className="mt-1"
-              />
-              <span>
-                <span className="block font-semibold">{area.label}</span>
-                <span className="mt-1 block text-sm text-slate-400">
-                  {area.level} · {area.country_code.toUpperCase()}
-                </span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-      )}
+      <div className="flex flex-wrap gap-3">
+        <button
+          type="button"
+          className="terminal-button"
+          disabled={
+            busy ||
+            !online ||
+            !dirty ||
+            !polygon ||
+            Boolean(validationError)
+          }
+          onClick={save}
+        >
+          Save selected area
+        </button>
 
-      {selected && (
-        <div className="space-y-3 rounded-xl border border-amber-400/30 p-4">
-          <p>
-            Applying this area preserves extracted addresses and saved
-            journeys. Address verification and candidates will be reset.
-            Saved corrections must pass the new area and road checks.
-          </p>
+        <button
+          type="button"
+          className="terminal-button-secondary"
+          disabled={busy || !dirty}
+          onClick={restoreSaved}
+        >
+          Restore saved area
+        </button>
 
-          <button
-            type="button"
-            className="terminal-button"
-            disabled={busy || !online}
-            onClick={apply}
-          >
-            Apply selected area
-          </button>
-        </div>
+        <button
+          type="button"
+          className="terminal-button-secondary"
+          disabled={busy || !online || dirty}
+          onClick={reload}
+        >
+          Reload account settings
+        </button>
+      </div>
+
+      {!online && (
+        <p className="text-sm text-amber-200">
+          Reconnect and sign in to save your area.
+        </p>
       )}
 
       {error && (
-        <p role="alert" className="text-red-300">{error}</p>
+        <p role="alert" className="text-red-300">
+          {error}
+        </p>
       )}
 
-      <button
-        type="button"
-        className="terminal-button-secondary"
-        disabled={busy || searching || !online}
-        onClick={onReload}
-      >
-        Reload saved settings
-      </button>
+      {notice && (
+        <p role="status" className="text-emerald-300">
+          {notice}
+        </p>
+      )}
 
       <p className="text-sm text-slate-400">
-        Settings are saved for your account independently of the
-        journey’s 24-hour retention. Selecting a wider area does not
-        expand the routing service’s road map.
+        Settings are stored per account separately from journey
+        retention. The selected area does not expand OSRM’s available
+        road map.
       </p>
     </section>
   );

@@ -475,7 +475,9 @@ export default function RoutePlannerTab() {
     const { data, expected } = await review(service, confirmation);
     assertRevision(expected);
 
-    const areaID = settingsRef.current.area.place_id;
+    const areaID =
+  settingsRef.current.area.id ||
+  settingsRef.current.area.place_id;
 
     await store.change((current) => {
       const next = withServices(
@@ -546,7 +548,9 @@ export default function RoutePlannerTab() {
       setMessages({});
 
       const snapshot = store.getSnapshot().record.state;
-      const areaID = settingsRef.current.area.place_id;
+      const areaID =
+  settingsRef.current.area.id ||
+  settingsRef.current.area.place_id;
 
       for (const service of servicesOf(snapshot)) {
         const saved = snapshot.corrections?.[
@@ -698,40 +702,76 @@ export default function RoutePlannerTab() {
     }
   }
 
-  async function applyArea(selectionToken) {
-    if (busy.current) throw new Error('Wait for the current operation.');
-
-    busy.current = true;
-    setWorking('Saving geographic area');
-
-    try {
-      const { data } = await API.put('/route-planner/settings', {
-        expected_revision: settingsRef.current?.revision || '',
-        selection_token: selectionToken,
-      }, { timeout: 15000 });
-
-      if (!data.settings?.revision || !data.settings.area) {
-        throw new Error('Backend returned invalid saved settings.');
-      }
-
-      settingsRef.current = data.settings;
-      setSettings(data.settings);
-
-      if (store.getSnapshot().record) {
-        await store.change((current) =>
-          invalidateArea(current, data.settings.revision)
-        );
-      }
-
-      setSelectedIDs([]);
-      setMessages({});
-      setPicker(null);
-    } finally {
-      busy.current = false;
-      setWorking('');
-    }
+async function applyArea(selection) {
+  if (busy.current) {
+    throw new Error('Wait for the current operation.');
   }
 
+  if (!canConnect) {
+    throw new Error('Reconnect and sign in to save the area.');
+  }
+
+  if (
+    !selection?.polygon ||
+    selection.polygon.type !== 'Polygon'
+  ) {
+    throw new Error('Draw a valid delivery area first.');
+  }
+
+  busy.current = true;
+  setWorking('Saving delivery area');
+  setError('');
+
+  try {
+    const { data } = await API.put(
+      '/route-planner/settings',
+      {
+        expected_revision:
+          settingsRef.current?.revision || '',
+        label: selection.label,
+        polygon: selection.polygon,
+      },
+      { timeout: 20000 }
+    );
+
+    const saved = data.settings;
+
+    if (
+      !saved?.revision ||
+      saved.area?.type !== 'polygon' ||
+      !saved.area.id ||
+      saved.area.polygon?.type !== 'Polygon'
+    ) {
+      throw new Error(
+        'The backend did not confirm a saved polygon. ' +
+        'Deploy the polygon-settings backend before saving areas.'
+      );
+    }
+
+    // The server has saved the preference successfully.
+    settingsRef.current = saved;
+    setSettings(saved);
+
+    if (store.getSnapshot().record) {
+      await store.change((current) =>
+        invalidateArea(current, saved.revision)
+      );
+    }
+
+    setSelectedIDs([]);
+    setMessages({});
+    setPicker(null);
+  } catch (failure) {
+    if (failure.response?.data?.code === 'AREA_CHANGED') {
+      await loadSettings();
+    }
+
+    throw failure;
+  } finally {
+    busy.current = false;
+    setWorking('');
+  }
+}
   async function toggleExcluded(service) {
     const restored = service.status === 'excluded';
 
