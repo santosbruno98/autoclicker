@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -26,36 +27,40 @@ import (
 	"gorm.io/gorm"
 )
 
-const routeParserVersion = "structured-route-review-v2"
+const routeParserVersion = "zone-aware-extraction-v4"
 
 var (
-	postalPattern     = regexp.MustCompile(`\b\d{4}-\d{3}\b`)
+	postalPattern = regexp.MustCompile(`\b\d{4}-\d{3}\b`)
 	longNumberPattern = regexp.MustCompile(`\d{5,}`)
-	undefinedPattern  = regexp.MustCompile(`(?i)\b(undefined|null|nan)\b`)
+	undefinedPattern = regexp.MustCompile(
+		`(?i)\b(undefined|null|nan)\b`,
+	)
+	postalSpacingPattern = regexp.MustCompile(
+		`\b(\d{4})\s*-\s*(\d{3})\b`,
+	)
+	postalValuePattern = regexp.MustCompile(`^\d{4}(?:-\d{3})?$`)
 
-	routeGeminiClient = &http.Client{
-		Timeout: 60 * time.Second,
-	}
-
-	routeGeocodeClient = &http.Client{
-		Timeout: 15 * time.Second,
-	}
+	routeGeminiClient = &http.Client{Timeout: 60 * time.Second}
+	routeGeocodeClient = &http.Client{Timeout: 15 * time.Second}
 )
 
 type RouteCandidate struct {
-	ID          string  `json:"id"`
-	Address     string  `json:"address"`
-	Street      string  `json:"street"`
-	HouseNumber string  `json:"house_number"`
-	PostalCode  string  `json:"postal_code"`
-	Locality    string  `json:"locality"`
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
-	Confidence  float64 `json:"confidence"`
-	ResultType  string  `json:"result_type"`
-	MatchType   string  `json:"match_type"`
-	Exact       bool    `json:"exact"`
-	CanConfirm  bool    `json:"can_confirm"`
+	ID                string  `json:"id"`
+	Address           string  `json:"address"`
+	Street            string  `json:"street"`
+	HouseNumber       string  `json:"house_number"`
+	PostalCode        string  `json:"postal_code"`
+	Locality          string  `json:"locality"`
+	Latitude          float64 `json:"latitude"`
+	Longitude         float64 `json:"longitude"`
+	Confidence        float64 `json:"confidence"`
+	StreetConfidence  float64 `json:"street_confidence"`
+	ResultType        string  `json:"result_type"`
+	MatchType         string  `json:"match_type"`
+	Exact             bool    `json:"exact"`
+	CanConfirm        bool    `json:"can_confirm"`
+	InSelectedArea    bool    `json:"in_selected_area"`
+	LocationPrecision string  `json:"location_precision"`
 }
 
 type RouteConfirmation struct {
@@ -64,32 +69,35 @@ type RouteConfirmation struct {
 }
 
 type ParsedRouteService struct {
-	ID               string             `json:"id"`
-	SourceApp        string             `json:"source_app"`
-	SourceReference  string             `json:"source_reference"`
-	SourceImage      int                `json:"source_image"`
-	OriginalAddress  string             `json:"original_address"`
-	Address          string             `json:"address"`
-	Street           string             `json:"street"`
-	HouseNumber      string             `json:"house_number"`
-	PostalCode       string             `json:"postal_code"`
-	Locality         string             `json:"locality"`
-	ServiceType      string             `json:"service_type"`
-	ParcelCount      int                `json:"parcel_count"`
-	ExtractionIssues []string           `json:"extraction_issues"`
-	Candidates       []RouteCandidate   `json:"candidates"`
-	MatchedAddress   string             `json:"matched_address"`
-	Latitude         float64            `json:"latitude"`
-	Longitude        float64            `json:"longitude"`
-	RoadLatitude     float64            `json:"road_latitude"`
-	RoadLongitude    float64            `json:"road_longitude"`
-	SnapDistanceM    float64            `json:"snap_distance_m"`
-	Stage            string             `json:"stage"`
-	Status           string             `json:"status"`
-	Reason           string             `json:"reason"`
-	Confirmed        bool               `json:"confirmed"`
-	Confirmation     *RouteConfirmation `json:"confirmation,omitempty"`
-	Resolution       *RouteResolution   `json:"resolution,omitempty"`
+	ID                string             `json:"id"`
+	SourceApp         string             `json:"source_app"`
+	SourceReference   string             `json:"source_reference"`
+	SourceImage       int                `json:"source_image"`
+	OriginalAddress   string             `json:"original_address"`
+	OriginalAddresses []string           `json:"original_addresses,omitempty"`
+	Address           string             `json:"address"`
+	Street            string             `json:"street"`
+	HouseNumber       string             `json:"house_number"`
+	PostalCode        string             `json:"postal_code"`
+	Locality          string             `json:"locality"`
+	ServiceType       string             `json:"service_type"`
+	ParcelCount       int                `json:"parcel_count"`
+	ExtractionIssues  []string           `json:"extraction_issues"`
+	Candidates        []RouteCandidate   `json:"candidates"`
+	MatchedAddress    string             `json:"matched_address"`
+	LocationPrecision string             `json:"location_precision"`
+	AreaRevision      string             `json:"area_revision"`
+	Latitude          float64            `json:"latitude"`
+	Longitude         float64            `json:"longitude"`
+	RoadLatitude      float64            `json:"road_latitude"`
+	RoadLongitude     float64            `json:"road_longitude"`
+	SnapDistanceM     float64            `json:"snap_distance_m"`
+	Stage             string             `json:"stage"`
+	Status            string             `json:"status"`
+	Reason            string             `json:"reason"`
+	Confirmed         bool               `json:"confirmed"`
+	Confirmation      *RouteConfirmation `json:"confirmation,omitempty"`
+	Resolution        *RouteResolution   `json:"resolution,omitempty"`
 }
 
 type routeParseResult struct {
@@ -97,44 +105,57 @@ type routeParseResult struct {
 }
 
 const routeExtractionPrompt = `
-Extract visible delivery/collection SERVICE CARDS from these logistics screenshots.
-
-Return JSON only:
+Extract visible logistics SERVICE CARDS. Return JSON only:
 {
-  "services": [
-    {
-      "source_app": "gls|lds|unknown",
-      "source_reference": "visible shipment/service identifier or empty string",
-      "original_address": "all visible address text belonging to this card",
-      "street": "street name as visible, or empty string",
-      "house_number": "house number as visible, or empty string",
-      "postal_code": "Portuguese postal code as visible, or empty string",
-      "locality": "locality as visible, or empty string",
-      "service_type": "delivery|pickup|unknown",
-      "parcel_count": 1,
-      "extraction_issues": []
-    }
-  ]
+ "services": [{
+  "source_app": "gls|lds|unknown",
+  "source_reference": "",
+  "original_address": "",
+  "street": "",
+  "house_number": "",
+  "postal_code": "",
+  "locality": "",
+  "service_type": "delivery|pickup|unknown",
+  "parcel_count": 1,
+  "extraction_issues": []
+ }]
 }
 
 Rules:
-- A service card is one record. Two parcels on a card are not two services.
+- One card is one service. Two parcels on a card are not two services.
 - Keep separate cards even when they share an address.
-- GLS: D or E means delivery. P or an explicit collection label means pickup.
-- LDS: associate the postal-code/locality heading with the street inside
-  THE SAME card, even when the heading is above the street.
-- Never take a heading from an adjacent card.
-- Reproduce original address text without inventing or repairing information.
-- Preserve suspicious/repeated house numbers in original_address.
-- Flag corrupted numbers, cropped fields, obscured text, or unclear card
-  association in extraction_issues.
-- Do not invent missing house numbers, streets, postal codes, or localities.
-- If no service identifier is visible, use an empty source_reference.
-- Do not extract recipients, telephone numbers, customer names, button text,
-  navigation text, or unrelated numbers.
-- Do not use a telephone number as a service identifier.
-- A delivery/collection status is separate from address completeness.
+- Copy the visible shipment identifier exactly.
+- Never substitute a telephone number or postcode for a shipment identifier.
+- GLS D/E mean delivery. GLS P/R mean pickup.
+- Explicit collection/recolha/recogida labels mean pickup.
+- Use unknown for an unfamiliar application's service type.
+- LDS postcode/locality headings belong only to their own card.
+- Preserve all visible address text in original_address.
+- Separate street, house number, postcode and locality.
+- A missing house number is allowed. Use "" when absent.
+- Explicit S/N means no number: use house_number "S/N".
+- Do not confuse road numbers, floors, apartments or kilometre references
+  with house numbers.
+- Estrada Nacional 324 is a street name; KM 123 is not a house number.
+- Preserve corrupted numbers in original_address without guessing repairs.
+- If a house number is corrupted, leave it empty and add
+  "uncertain_house_number" to extraction_issues.
+- Use "unclear_card_association" when fields cannot be assigned to one card.
+- Use "cropped_street" or "cropped_locality" for truncated address fields.
+- Do not invent missing postcodes. A visible four-digit prefix is allowed.
+- Do not flag a missing house number or postcode as an extraction failure.
+- Do not include recipients, phone numbers, emails, customer names,
+  counters, navigation text or buttons in address fields.
+- Do not invent cards from the total pending-services counter.
 `
+
+func NewRouteRevision() string {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		panic("cryptographic randomness unavailable")
+	}
+	return hex.EncodeToString(value)
+}
 
 func routeHash(value []byte) string {
 	sum := sha256.Sum256(value)
@@ -145,10 +166,18 @@ func normalizeRouteAddress(value string) string {
 	return strings.Join(strings.Fields(strings.ToLower(value)), " ")
 }
 
-// Used for comparing address components, not for rewriting displayed text.
+func cleanRouteText(value string) string {
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func cleanRoutePostcode(value string) string {
+	return strings.TrimSpace(
+		postalSpacingPattern.ReplaceAllString(value, "$1-$2"),
+	)
+}
+
 func addressWords(value string) string {
 	var builder strings.Builder
-
 	for _, character := range norm.NFD.String(strings.ToLower(value)) {
 		if unicode.Is(unicode.Mn, character) {
 			continue
@@ -161,17 +190,13 @@ func addressWords(value string) string {
 	}
 
 	aliases := map[string]string{
-		"r":      "rua",
-		"av":     "avenida",
-		"n":      "",
-		"numero": "",
-		"grd":    "guarda",
+		"r": "rua", "av": "avenida", "dr": "doutor",
+		"prof": "professor", "grd": "guarda",
+		"numero": "", "n": "",
 	}
 
-	words := strings.Fields(builder.String())
-	result := make([]string, 0, len(words))
-
-	for _, word := range words {
+	result := make([]string, 0)
+	for _, word := range strings.Fields(builder.String()) {
 		if replacement, exists := aliases[word]; exists {
 			word = replacement
 		}
@@ -188,17 +213,35 @@ func containsAddressWords(expected, actual string) bool {
 		return false
 	}
 
-	actualWords := make(map[string]bool)
+	available := make(map[string]bool)
 	for _, word := range strings.Fields(addressWords(actual)) {
-		actualWords[word] = true
+		available[word] = true
 	}
-
 	for _, word := range words {
-		if !actualWords[word] {
+		if !available[word] {
 			return false
 		}
 	}
 	return true
+}
+
+func sameRouteStreet(first, second string) bool {
+	return containsAddressWords(first, second) &&
+		containsAddressWords(second, first)
+}
+
+func uniqueRouteStrings(values ...string) []string {
+	result := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		key := normalizeRouteAddress(value)
+		if key != "" && !seen[key] {
+			seen[key] = true
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func serviceAddress(service ParsedRouteService) string {
@@ -208,62 +251,92 @@ func serviceAddress(service ParsedRouteService) string {
 	return service.Address
 }
 
+func routeEvidence(service ParsedRouteService) string {
+	values := append([]string{serviceAddress(service)}, service.OriginalAddresses...)
+	return strings.Join(uniqueRouteStrings(values...), "\n")
+}
+
+func hasRouteIssue(service ParsedRouteService, issue string) bool {
+	for _, existing := range service.ExtractionIssues {
+		if strings.EqualFold(existing, issue) {
+			return true
+		}
+	}
+	return false
+}
+
+func noRouteHouse(value string) bool {
+	switch strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), " ", "")) {
+	case "", "s/n", "sn", "s.n.", "semnumero", "semnúmero":
+		return true
+	default:
+		return false
+	}
+}
+
 func extractionProblem(service ParsedRouteService) string {
-	original := serviceAddress(service)
+	for _, issue := range []string{
+		"conflicting_shipment_address",
+		"unclear_card_association",
+		"cropped_street",
+		"cropped_locality",
+	} {
+		if hasRouteIssue(service, issue) {
+			return issue
+		}
+	}
 
-	if len(service.ExtractionIssues) > 0 {
-		return strings.Join(service.ExtractionIssues, "; ")
-	}
-	if undefinedPattern.MatchString(original) {
-		return "Address contains undefined fields"
+	if service.Street == "" || service.Locality == "" {
+		return "Street and locality are required"
 	}
 
-	withoutPostal := postalPattern.ReplaceAllString(original, "")
-	if longNumberPattern.MatchString(withoutPostal) {
-		return "Address contains a suspicious number; confirm its location"
+	if strings.Contains(service.Street, "...") ||
+		strings.Contains(service.Street, "…") ||
+		strings.Contains(service.Locality, "...") ||
+		strings.Contains(service.Locality, "…") {
+		return "Street or locality is truncated"
 	}
-	if strings.TrimSpace(service.Street) == "" {
-		return "Street is missing or obscured"
+
+	if undefinedPattern.MatchString(service.Street + " " + service.Locality) {
+		return "Street or locality contains an undefined field"
 	}
-	if !postalPattern.MatchString(service.PostalCode) {
-		return "Portuguese postal code is missing or invalid"
+
+	if service.PostalCode != "" &&
+		!postalValuePattern.MatchString(service.PostalCode) {
+		return "Visible postcode is malformed"
 	}
-	if strings.TrimSpace(service.Locality) == "" {
-		return "Locality is missing"
-	}
+
 	return ""
 }
 
 func normalizeExtractedService(
-	service ParsedRouteService,
+	input ParsedRouteService,
 	imageHash string,
 	cardIndex int,
 ) ParsedRouteService {
-	service.OriginalAddress = strings.TrimSpace(service.OriginalAddress)
-	if service.OriginalAddress == "" {
-		service.OriginalAddress = strings.TrimSpace(service.Address)
+	service := ParsedRouteService{
+		SourceApp:         strings.ToLower(strings.TrimSpace(input.SourceApp)),
+		SourceReference:   strings.TrimSpace(input.SourceReference),
+		OriginalAddress:   strings.TrimSpace(serviceAddress(input)),
+		Street:            cleanRouteText(input.Street),
+		HouseNumber:       cleanRouteText(input.HouseNumber),
+		PostalCode:        cleanRoutePostcode(input.PostalCode),
+		Locality:          cleanRouteText(input.Locality),
+		ParcelCount:       input.ParcelCount,
+		ExtractionIssues:  uniqueRouteStrings(input.ExtractionIssues...),
+		Candidates:        []RouteCandidate{},
+		Stage:             "extracted",
+		Status:            "needs_attention",
 	}
 
-	service.Address = service.OriginalAddress
-	service.Street = strings.TrimSpace(service.Street)
-	service.HouseNumber = strings.TrimSpace(service.HouseNumber)
-	service.PostalCode = strings.TrimSpace(service.PostalCode)
-	service.Locality = strings.TrimSpace(service.Locality)
-	service.SourceReference = strings.TrimSpace(service.SourceReference)
-
-	switch strings.ToLower(strings.TrimSpace(service.SourceApp)) {
-	case "gls":
-		service.SourceApp = "gls"
-	case "lds":
-		service.SourceApp = "lds"
-	default:
+	if service.SourceApp != "gls" && service.SourceApp != "lds" {
 		service.SourceApp = "unknown"
 	}
 
-	switch strings.ToLower(strings.TrimSpace(service.ServiceType)) {
+	switch strings.ToLower(input.ServiceType) {
 	case "delivery", "d", "e":
 		service.ServiceType = "delivery"
-	case "pickup", "p":
+	case "pickup", "p", "r":
 		service.ServiceType = "pickup"
 	default:
 		service.ServiceType = "unknown"
@@ -273,120 +346,73 @@ func normalizeExtractedService(
 		service.ParcelCount = 1
 	}
 
-	identity := service.SourceApp + ":" + service.SourceReference
+	service.Address = service.OriginalAddress
+	service.OriginalAddresses = []string{service.OriginalAddress}
+
+	identity := service.SourceApp + ":" +
+		strings.ToUpper(strings.Join(strings.Fields(service.SourceReference), ""))
+
 	if service.SourceReference == "" {
-		// No invented shipment identity. Preserve separate cards.
-		identity = fmt.Sprintf(
-			"%s:%d:%s",
-			imageHash,
-			cardIndex,
-			service.OriginalAddress,
-		)
+		identity = fmt.Sprintf("%s:%d", imageHash, cardIndex)
 	}
 
 	service.ID = routeHash([]byte(identity))
-	service.Stage = "extracted"
-	service.Status = "needs_attention"
 	service.Reason = extractionProblem(service)
-	service.Candidates = []RouteCandidate{}
-
 	return service
-}
-
-func decodeRouteExtraction(
-	text string,
-	imageHash string,
-) ([]ParsedRouteService, error) {
-	var result struct {
-		Services *[]ParsedRouteService `json:"services"`
-	}
-
-	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &result); err != nil {
-		return nil, errors.New("Gemini returned invalid extraction JSON")
-	}
-	if result.Services == nil {
-		return nil, errors.New("Gemini response is missing the services array")
-	}
-	if len(*result.Services) > 500 {
-		return nil, errors.New("Too many extracted service cards")
-	}
-
-	services := make([]ParsedRouteService, 0, len(*result.Services))
-	for index, service := range *result.Services {
-		service = normalizeExtractedService(service, imageHash, index)
-		if service.OriginalAddress == "" {
-			service.Reason = "Address is missing or obscured"
-		}
-		services = append(services, service)
-	}
-	return services, nil
 }
 
 func configuredRouteGeminiModels() []string {
 	value := strings.TrimSpace(os.Getenv("ROUTE_GEMINI_MODELS"))
 	if value == "" {
-		value = strings.TrimSpace(os.Getenv("ROUTE_GEMINI_MODEL")) +
-			",gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.6-flash"
+		value = strings.TrimSpace(os.Getenv("ROUTE_GEMINI_MODEL"))
 	}
 
-	var result []string
-	seen := map[string]bool{}
-
-	for _, item := range strings.Split(value, ",") {
-		model := strings.TrimPrefix(strings.TrimSpace(item), "models/")
-		if model != "" && !seen[model] {
-			seen[model] = true
-			result = append(result, model)
-		}
+	// Retain the repository's existing fallback configuration.
+	if value == "" {
+		value = "gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.6-flash"
 	}
-	return result
+
+	models := make([]string, 0)
+	for _, model := range uniqueRouteStrings(strings.Split(value, ",")...) {
+		models = append(models, strings.TrimPrefix(model, "models/"))
+	}
+	return models
 }
 
-func extractRouteImage(
+func requestRouteGeminiText(
 	ctx context.Context,
-	data []byte,
-	mime string,
-	imageHash string,
-) ([]ParsedRouteService, error) {
+	prompt string,
+	extraParts []any,
+) (string, string, error) {
 	key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY"))
 	if key == "" {
-		return nil, errors.New("GEMINI_API_KEY is missing")
+		return "", "", errors.New("GEMINI_API_KEY is missing")
 	}
 
-	payload := map[string]any{
-		"contents": []any{
-			map[string]any{
-				"parts": []any{
-					map[string]string{"text": routeExtractionPrompt},
-					map[string]any{
-						"inline_data": map[string]string{
-							"mime_type": mime,
-							"data":      base64.StdEncoding.EncodeToString(data),
-						},
-					},
-				},
-			},
-		},
+	parts := append(
+		[]any{map[string]string{"text": prompt}},
+		extraParts...,
+	)
+
+	body, err := json.Marshal(map[string]any{
+		"contents": []any{map[string]any{"parts": parts}},
 		"generationConfig": map[string]any{
 			"responseMimeType": "application/json",
+			"temperature":      0,
 		},
-	}
-
-	body, err := json.Marshal(payload)
+	})
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
-
-	attempts := make([]string, 0)
 
 	for _, model := range configuredRouteGeminiModels() {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return "", "", ctx.Err()
 		}
 
-		attemptCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		attempt, cancel := context.WithTimeout(ctx, 45*time.Second)
 		req, err := http.NewRequestWithContext(
-			attemptCtx,
+			attempt,
 			http.MethodPost,
 			"https://generativelanguage.googleapis.com/v1beta/models/"+
 				url.PathEscape(model)+":generateContent",
@@ -394,16 +420,15 @@ func extractRouteImage(
 		)
 		if err != nil {
 			cancel()
-			return nil, errors.New("Cannot create Gemini request")
+			return "", "", errors.New("Cannot create Gemini request")
 		}
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("x-goog-api-key", key)
 
-		resp, requestErr := routeGeminiClient.Do(req)
-		if requestErr != nil {
+		resp, err := routeGeminiClient.Do(req)
+		if err != nil {
 			cancel()
-			attempts = append(attempts, model+": request failed")
 			continue
 		}
 
@@ -412,55 +437,39 @@ func extractRouteImage(
 		cancel()
 
 		if readErr != nil || len(raw) > 2<<20 {
-			attempts = append(attempts, model+": invalid response size")
 			continue
 		}
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return nil, errors.New("Gemini rejected the configured credentials")
+			return "", "", errors.New("Gemini rejected its configured credentials")
 		}
-		if resp.StatusCode != http.StatusOK {
-			attempts = append(
-				attempts,
-				fmt.Sprintf("%s: HTTP %d", model, resp.StatusCode),
-			)
+		if resp.StatusCode != 200 {
 			continue
 		}
 
-		var envelope struct {
+		var result struct {
 			PromptFeedback struct {
 				BlockReason string `json:"blockReason"`
 			} `json:"promptFeedback"`
 			Candidates []struct {
 				FinishReason string `json:"finishReason"`
-				Content      struct {
+				Content struct {
 					Parts []struct {
-						Text    string `json:"text"`
-						Thought bool   `json:"thought"`
+						Text string `json:"text"`
+						Thought bool `json:"thought"`
 					} `json:"parts"`
 				} `json:"content"`
 			} `json:"candidates"`
 		}
 
-		if json.Unmarshal(raw, &envelope) != nil {
-			attempts = append(attempts, model+": invalid response envelope")
-			continue
-		}
-		if envelope.PromptFeedback.BlockReason != "" {
-			return nil, errors.New("Gemini blocked screenshot processing")
-		}
-		if len(envelope.Candidates) == 0 {
-			attempts = append(attempts, model+": empty response")
+		if json.Unmarshal(raw, &result) != nil ||
+			len(result.Candidates) == 0 ||
+			result.PromptFeedback.BlockReason != "" {
 			continue
 		}
 
-		candidate := envelope.Candidates[0]
-		switch candidate.FinishReason {
-		case "SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
-			return nil, errors.New("Gemini blocked screenshot processing")
-		case "", "STOP":
-		default:
-			attempts = append(attempts, model+": incomplete response")
+		candidate := result.Candidates[0]
+		if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
 			continue
 		}
 
@@ -471,17 +480,50 @@ func extractRouteImage(
 			}
 		}
 
-		services, decodeErr := decodeRouteExtraction(text.String(), imageHash)
-		if decodeErr == nil {
-			return services, nil
+		if strings.TrimSpace(text.String()) != "" {
+			return text.String(), model, nil
 		}
-		attempts = append(attempts, model+": invalid extraction structure")
 	}
 
-	return nil, fmt.Errorf(
-		"Screenshot extraction failed: %s",
-		strings.Join(attempts, "; "),
-	)
+	return "", "", errors.New("No configured Gemini model completed the request")
+}
+
+func decodeRouteExtraction(text, imageHash string) ([]ParsedRouteService, error) {
+	var result struct {
+		Services *[]ParsedRouteService `json:"services"`
+	}
+
+	if json.Unmarshal([]byte(text), &result) != nil || result.Services == nil {
+		return nil, errors.New("Invalid screenshot extraction JSON")
+	}
+	if len(*result.Services) > 500 {
+		return nil, errors.New("Too many extracted cards")
+	}
+
+	services := make([]ParsedRouteService, 0, len(*result.Services))
+	for index, service := range *result.Services {
+		services = append(services, normalizeExtractedService(service, imageHash, index))
+	}
+	return services, nil
+}
+
+func extractRouteImage(
+	ctx context.Context,
+	data []byte,
+	mime, imageHash string,
+) ([]ParsedRouteService, error) {
+	text, _, err := requestRouteGeminiText(ctx, routeExtractionPrompt, []any{
+		map[string]any{
+			"inline_data": map[string]string{
+				"mime_type": mime,
+				"data": base64.StdEncoding.EncodeToString(data),
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return decodeRouteExtraction(text, imageHash)
 }
 
 func parseRouteImage(
@@ -489,20 +531,13 @@ func parseRouteImage(
 	data []byte,
 	mime string,
 ) ([]ParsedRouteService, error) {
-	// Changing the extraction policy invalidates old image-cache results.
-	hash := routeHash(append(
-		[]byte(routeParserVersion+":"),
-		data...,
-	))
-
+	hash := routeHash(append([]byte(routeParserVersion+":"), data...))
 	var cached models.RouteImageCache
-	err := database.RouteDB.WithContext(ctx).
-		First(&cached, "hash = ?", hash).Error
 
+	err := database.RouteDB.WithContext(ctx).First(&cached, "hash = ?", hash).Error
 	if err == nil {
 		var result routeParseResult
-		if json.Unmarshal(cached.Result, &result) == nil &&
-			result.Services != nil {
+		if json.Unmarshal(cached.Result, &result) == nil && result.Services != nil {
 			return result.Services, nil
 		}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -514,332 +549,168 @@ func parseRouteImage(
 		return nil, err
 	}
 
-	encoded, err := json.Marshal(routeParseResult{Services: services})
-	if err == nil {
-		// Cache failure does not discard successful extraction.
-		_ = database.RouteDB.WithContext(ctx).
-			Save(&models.RouteImageCache{
-				Hash:   hash,
-				Result: encoded,
-			}).Error
+	if encoded, encodeErr := json.Marshal(routeParseResult{Services: services}); encodeErr == nil {
+		_ = database.RouteDB.WithContext(ctx).Save(
+			&models.RouteImageCache{Hash: hash, Result: encoded},
+		).Error
 	}
+
 	return services, nil
 }
 
-func deduplicateRouteServices(
-	input []ParsedRouteService,
-) []ParsedRouteService {
+func routeEvidenceScore(service ParsedRouteService) int {
+	score := 0
+	if service.Street != "" {
+		score += 20
+	}
+	if service.Locality != "" {
+		score += 20
+	}
+	if len(service.PostalCode) == 8 {
+		score += 10
+	}
+	if !noRouteHouse(service.HouseNumber) &&
+		!longNumberPattern.MatchString(service.HouseNumber) {
+		score += 5
+	}
+	return score - len(service.ExtractionIssues)*3
+}
+
+func routeEvidenceConflict(first, second ParsedRouteService) bool {
+	conflicts := func(a, b string) bool {
+		return a != "" && b != "" &&
+			!containsAddressWords(a, b) &&
+			!containsAddressWords(b, a)
+	}
+
+	if conflicts(first.Street, second.Street) ||
+		conflicts(first.Locality, second.Locality) ||
+		!routePostcodesCompatible(first.PostalCode, second.PostalCode) {
+		return true
+	}
+
+	if !noRouteHouse(first.HouseNumber) &&
+		!noRouteHouse(second.HouseNumber) &&
+		!longNumberPattern.MatchString(first.HouseNumber) &&
+		!longNumberPattern.MatchString(second.HouseNumber) &&
+		addressWords(first.HouseNumber) != addressWords(second.HouseNumber) {
+		return true
+	}
+
+	return first.ServiceType != "unknown" &&
+		second.ServiceType != "unknown" &&
+		first.ServiceType != second.ServiceType
+}
+
+func MergeRouteServices(input []ParsedRouteService) []ParsedRouteService {
 	result := make([]ParsedRouteService, 0, len(input))
-	positions := map[string]int{}
+	positions := make(map[string]int)
 
 	for _, service := range input {
-		if index, exists := positions[service.ID]; exists {
-			previous := result[index]
+		key := service.ID
+		if service.SourceReference != "" {
+			key = service.SourceApp + ":" +
+				strings.ToUpper(strings.Join(strings.Fields(service.SourceReference), ""))
+		}
 
-			// Same reference with conflicting addresses must not be hidden.
-			if normalizeRouteAddress(previous.OriginalAddress) !=
-				normalizeRouteAddress(service.OriginalAddress) {
-				result[index].ExtractionIssues = append(
-					result[index].ExtractionIssues,
-					"Same service identifier appears with different addresses",
-				)
+		position, exists := positions[key]
+		if key == "" || !exists {
+			if key != "" {
+				positions[key] = len(result)
 			}
+			result = append(result, service)
 			continue
 		}
-		positions[service.ID] = len(result)
-		result = append(result, service)
-	}
 
-	// Without identifiers, an overlap cannot always be distinguished
-	// from separate services at one address. Require review.
-	byAddress := map[string][]int{}
-	for index, service := range result {
-		if service.SourceReference == "" {
-			key := normalizeRouteAddress(service.OriginalAddress) +
-				":" + service.ServiceType
-			byAddress[key] = append(byAddress[key], index)
-		}
-	}
+		old := result[position]
+		conflict := routeEvidenceConflict(old, service)
+		winner, other := old, service
 
-	for _, indices := range byAddress {
-		if len(indices) < 2 {
-			continue
+		if routeEvidenceScore(service) > routeEvidenceScore(old) {
+			winner, other = service, old
 		}
-		for _, index := range indices {
-			result[index].ExtractionIssues = append(
-				result[index].ExtractionIssues,
-				"Possible overlapping screenshot duplicate without a service identifier",
+
+		winner.ID = old.ID
+		evidence := append([]string{}, old.OriginalAddresses...)
+		evidence = append(evidence, service.OriginalAddresses...)
+		evidence = append(evidence, serviceAddress(old), serviceAddress(service))
+		winner.OriginalAddresses = uniqueRouteStrings(evidence...)
+
+		if !conflict {
+			if winner.Street == "" {
+				winner.Street = other.Street
+			}
+			if winner.Locality == "" {
+				winner.Locality = other.Locality
+			}
+			if winner.HouseNumber == "" {
+				winner.HouseNumber = other.HouseNumber
+			}
+			if winner.PostalCode == "" ||
+				(len(winner.PostalCode) == 4 && len(other.PostalCode) == 8) {
+				winner.PostalCode = other.PostalCode
+			}
+			if winner.ServiceType == "unknown" {
+				winner.ServiceType = other.ServiceType
+			}
+		}
+
+		// Repeated observations do not increase parcel count.
+		if other.ParcelCount > winner.ParcelCount {
+			winner.ParcelCount = other.ParcelCount
+		}
+
+		if conflict ||
+			hasRouteIssue(old, "conflicting_shipment_address") ||
+			hasRouteIssue(service, "conflicting_shipment_address") {
+			winner.ExtractionIssues = uniqueRouteStrings(
+				append(winner.ExtractionIssues, "conflicting_shipment_address")...,
 			)
 		}
+
+		result[position] = winner
 	}
+
 	return result
 }
 
-type geoRouteProperties struct {
-	Formatted   string  `json:"formatted"`
-	Street      string  `json:"street"`
-	HouseNumber string  `json:"housenumber"`
-	Postcode    string  `json:"postcode"`
-	CountryCode string  `json:"country_code"`
-	City        string  `json:"city"`
-	Town        string  `json:"town"`
-	Village     string  `json:"village"`
-	Suburb      string  `json:"suburb"`
-	District    string  `json:"district"`
-	Lat         float64 `json:"lat"`
-	Lon         float64 `json:"lon"`
-	ResultType  string  `json:"result_type"`
-	Rank        struct {
-		Confidence       float64 `json:"confidence"`
-		StreetConfidence float64 `json:"confidence_street_level"`
-		MatchType        string  `json:"match_type"`
-	} `json:"rank"`
+func deduplicateRouteServices(input []ParsedRouteService) []ParsedRouteService {
+	return MergeRouteServices(input)
 }
 
-func candidateFor(
-	service ParsedRouteService,
-	point geoRouteProperties,
-) RouteCandidate {
-	locality := strings.Join([]string{
-		point.City,
-		point.Town,
-		point.Village,
-		point.Suburb,
-		point.District,
-	}, " ")
-
-	valid := validPoint(RouteInputStop{
-		Latitude:  point.Lat,
-		Longitude: point.Lon,
-	})
-
-	postalMatch := service.PostalCode != "" &&
-		point.Postcode == service.PostalCode
-
-	streetMatch := containsAddressWords(service.Street, point.Street)
-	localityMatch := containsAddressWords(service.Locality, locality)
-
-	houseMatch := service.HouseNumber != "" &&
-		addressWords(service.HouseNumber) == addressWords(point.HouseNumber)
-
-	exact := valid &&
-		strings.EqualFold(point.CountryCode, "pt") &&
-		postalMatch &&
-		streetMatch &&
-		localityMatch &&
-		houseMatch &&
-		point.Rank.Confidence >= 0.9 &&
-		point.Rank.StreetConfidence >= 0.9 &&
-		(point.ResultType == "building" ||
-			point.Rank.MatchType == "match_by_building" ||
-			point.Rank.MatchType == "full_match")
-
-	return RouteCandidate{
-		ID: routeHash([]byte(fmt.Sprintf(
-			"%s:%.7f:%.7f",
-			point.Formatted,
-			point.Lat,
-			point.Lon,
-		))),
-		Address:     point.Formatted,
-		Street:      point.Street,
-		HouseNumber: point.HouseNumber,
-		PostalCode:  point.Postcode,
-		Locality:    strings.TrimSpace(locality),
-		Latitude:    point.Lat,
-		Longitude:   point.Lon,
-		Confidence:  point.Rank.Confidence,
-		ResultType:  point.ResultType,
-		MatchType:   point.Rank.MatchType,
-		Exact:       exact,
-		CanConfirm: valid &&
-			strings.EqualFold(point.CountryCode, "pt") &&
-			postalMatch &&
-			point.Street != "",
-	}
-}
-
-func lookupRouteCandidates(
-	ctx context.Context,
-	service ParsedRouteService,
-) ([]RouteCandidate, error) {
-	key := strings.TrimSpace(os.Getenv("GEOAPIFY_API_KEY"))
-	if key == "" {
-		return nil, errors.New("GEOAPIFY_API_KEY is missing")
-	}
-
-	query := url.Values{}
-	query.Set("text", serviceAddress(service))
-	query.Set("filter", "countrycode:pt")
-	query.Set("limit", "5")
-	query.Set("apiKey", key)
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		"https://api.geoapify.com/v1/geocode/search?"+query.Encode(),
-		nil,
-	)
+func requireAreaRevision(c *gin.Context, revision string) bool {
+	settings, err := CurrentRouteSettings(c.Request.Context())
 	if err != nil {
-		return nil, errors.New("Cannot create address lookup")
+		c.JSON(428, gin.H{"error": err.Error(), "code": "AREA_REQUIRED"})
+		return false
 	}
-
-	resp, err := routeGeocodeClient.Do(req)
-	if err != nil {
-		// Do not return an error containing the API-key URL.
-		return nil, errors.New("Address lookup is unavailable")
+	if revision != settings.Revision {
+		c.JSON(409, gin.H{
+			"error": "The selected area changed; reload settings and revalidate addresses",
+			"code": "AREA_CHANGED",
+		})
+		return false
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Address lookup HTTP %d", resp.StatusCode)
-	}
-
-	var result struct {
-		Features []struct {
-			Properties geoRouteProperties `json:"properties"`
-		} `json:"features"`
-	}
-
-	if err := json.NewDecoder(
-		io.LimitReader(resp.Body, 2<<20),
-	).Decode(&result); err != nil {
-		return nil, errors.New("Invalid address lookup response")
-	}
-
-	candidates := make([]RouteCandidate, 0, len(result.Features))
-	seen := map[string]bool{}
-
-	for _, feature := range result.Features {
-		candidate := candidateFor(service, feature.Properties)
-		if !seen[candidate.ID] {
-			seen[candidate.ID] = true
-			candidates = append(candidates, candidate)
-		}
-	}
-	return candidates, nil
-}
-
-func reviewRouteService(
-	ctx context.Context,
-	service ParsedRouteService,
-	confirmation *RouteConfirmation,
-) ParsedRouteService {
-	service.Status = "needs_attention"
-	service.Stage = "extracted"
-	service.Reason = ""
-
-	service.Latitude = 0
-	service.Longitude = 0
-	service.RoadLatitude = 0
-	service.RoadLongitude = 0
-	service.SnapDistanceM = 0
-
-	service.Confirmed = false
-	service.Confirmation = nil
-	service.MatchedAddress = ""
-	service.Candidates = []RouteCandidate{}
-
-	// Never trust an audit submitted by the browser.
-	service.Resolution = newRouteResolution(service)
-
-	if service.OriginalAddress == "" {
-		service.OriginalAddress = service.Address
-	}
-	service.Address = service.OriginalAddress
-
-	if confirmation != nil {
-		// This is an explicit user override, not an AI decision.
-		if !validPoint(RouteInputStop{
-			Latitude:  confirmation.Latitude,
-			Longitude: confirmation.Longitude,
-		}) {
-			return resolutionFailure(
-				service,
-				errors.New("Selected coordinates are invalid"),
-			)
-		}
-
-		service.Latitude = confirmation.Latitude
-		service.Longitude = confirmation.Longitude
-		service.Confirmation = &RouteConfirmation{
-			Latitude:  confirmation.Latitude,
-			Longitude: confirmation.Longitude,
-		}
-		service.Confirmed = true
-		service.Stage = "geocoded"
-		service.MatchedAddress = "User-confirmed location"
-
-		service.Resolution.Method = "user_pin"
-		service.Resolution.Decision = "selected"
-		service.Resolution.Reason =
-			"Location explicitly selected by the user"
-
-		// Even user-selected coordinates must pass the road check.
-		return applyRouteRoadCheck(ctx, service)
-	}
-
-	normalized, err := normalizeRouteEvidence(
-		service,
-		service.Resolution,
-	)
-	service = normalized
-
-	if err != nil {
-		return resolutionFailure(service, err)
-	}
-
-	candidates, err := lookupResolutionCandidates(
-		ctx,
-		service,
-		service.Resolution,
-	)
-	if err != nil {
-		return resolutionFailure(service, err)
-	}
-
-	service.Candidates = candidates
-	if len(candidates) > 0 {
-		service.Stage = "geocoded"
-	}
-
-	selected, err := resolveRouteCandidate(
-		ctx,
-		service,
-		candidates,
-		service.Resolution,
-	)
-	if err != nil {
-		return resolutionFailure(service, err)
-	}
-
-	// Coordinates are copied exclusively from the geocoder result.
-	// Gemini's response schema has no coordinate fields.
-	service.Latitude = selected.Latitude
-	service.Longitude = selected.Longitude
-	service.MatchedAddress = selected.Address
-	service.Stage = "geocoded"
-
-	return applyRouteRoadCheck(ctx, service)
+	return true
 }
 
 func ParseRouteScreenshots(c *gin.Context) {
-	c.Header("X-Route-Parser-Version", routeParserVersion)
-
 	if database.RouteDB == nil {
 		c.JSON(503, gin.H{"error": "Routes database unavailable"})
 		return
 	}
 
-	// Includes multipart overhead for ten screenshots of up to 10 MiB.
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 105<<20)
-
 	form, err := c.MultipartForm()
 	if err != nil {
-		c.JSON(400, gin.H{"error": "Expected screenshots under the files field"})
+		c.JSON(400, gin.H{"error": "Expected screenshots in files"})
 		return
 	}
 	defer form.RemoveAll()
+
+	if !requireAreaRevision(c, c.PostForm("area_revision")) {
+		return
+	}
 
 	files := form.File["files"]
 	if len(files) < 1 || len(files) > 10 {
@@ -850,7 +721,7 @@ func ParseRouteScreenshots(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 240*time.Second)
 	defer cancel()
 
-	var extracted []ParsedRouteService
+	extracted := make([]ParsedRouteService, 0)
 
 	for index, header := range files {
 		if header.Size <= 0 || header.Size > 10<<20 {
@@ -858,16 +729,16 @@ func ParseRouteScreenshots(c *gin.Context) {
 			return
 		}
 
-		file, openErr := header.Open()
-		if openErr != nil {
+		file, err := header.Open()
+		if err != nil {
 			c.JSON(400, gin.H{"error": "Cannot open screenshot"})
 			return
 		}
-		data, readErr := io.ReadAll(io.LimitReader(file, (10<<20)+1))
+		data, err := io.ReadAll(io.LimitReader(file, (10<<20)+1))
 		file.Close()
 
-		if readErr != nil || len(data) > 10<<20 {
-			c.JSON(413, gin.H{"error": "Cannot read screenshot or file is too large"})
+		if err != nil || len(data) > 10<<20 {
+			c.JSON(413, gin.H{"error": "Cannot read screenshot"})
 			return
 		}
 
@@ -877,26 +748,19 @@ func ParseRouteScreenshots(c *gin.Context) {
 			return
 		}
 
-		services, parseErr := parseRouteImage(ctx, data, mime)
-		if parseErr != nil {
-			c.JSON(502, gin.H{
-				"error":          parseErr.Error(),
-				"image_index":    index + 1,
-				"parser_version": routeParserVersion,
-			})
+		services, err := parseRouteImage(ctx, data, mime)
+		if err != nil {
+			c.JSON(502, gin.H{"error": err.Error(), "image_index": index + 1})
 			return
 		}
-
 		for _, service := range services {
 			service.SourceImage = index + 1
 			extracted = append(extracted, service)
 		}
 	}
 
-	services := deduplicateRouteServices(extracted)
+	services := MergeRouteServices(extracted)
 
-	// Preserve extracted work even when lookup/road checks fail.
-	// A failure becomes an individual review item, not a lost batch.
 	for index := range services {
 		if ctx.Err() != nil {
 			services[index].Status = "needs_attention"
@@ -906,125 +770,70 @@ func ParseRouteScreenshots(c *gin.Context) {
 		services[index] = reviewRouteService(ctx, services[index], nil)
 	}
 
-	ready := make([]ParsedRouteService, 0)
-	attention := make([]ParsedRouteService, 0)
-
-	for _, service := range services {
-		if service.Status == "ready" {
-			ready = append(ready, service)
-		} else {
-			attention = append(attention, service)
-		}
-	}
-
+	settings, _ := CurrentRouteSettings(ctx)
+	c.Header("X-Route-Parser-Version", routeParserVersion)
 	c.JSON(200, gin.H{
 		"services": services,
-		// Compatibility with existing consumers.
-		"complete":       ready,
-		"uncomplete":     attention,
+		"area_revision": settings.Revision,
 		"parser_version": routeParserVersion,
 	})
 }
 
 func VerifyRouteAddress(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-
-	c.Request.Body = http.MaxBytesReader(
-		c.Writer,
-		c.Request.Body,
-		256<<10,
-	)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 256<<10)
 
 	var input struct {
-		Action  string             `json:"action"`
+		Action string `json:"action"`
+		AreaRevision string `json:"area_revision"`
 		Service ParsedRouteService `json:"service"`
-		Address string             `json:"address"`
 		Confirm *RouteConfirmation `json:"confirm"`
 	}
 
 	if c.ShouldBindJSON(&input) != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid address review request",
-		})
+		c.JSON(400, gin.H{"error": "Invalid address request"})
+		return
+	}
+	if !requireAreaRevision(c, input.AreaRevision) {
 		return
 	}
 
-	switch input.Action {
-	case "", "verify", "ai_assist":
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Unsupported address action",
-		})
+	if input.Action != "" && input.Action != "verify" &&
+		input.Action != "ai_assist" {
+		c.JSON(400, gin.H{"error": "Unsupported address action"})
 		return
 	}
 
 	if input.Action == "ai_assist" && input.Confirm != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "AI assistance and pin confirmation are separate actions",
-		})
+		c.JSON(400, gin.H{"error": "AI assistance and pin confirmation are separate actions"})
 		return
 	}
 
-	if input.Service.OriginalAddress == "" {
-		input.Service.OriginalAddress = input.Service.Address
-	}
-	if input.Service.OriginalAddress == "" {
-		input.Service.OriginalAddress = input.Address
-	}
-
-	if strings.TrimSpace(input.Service.OriginalAddress) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Original address is required",
-		})
+	if strings.TrimSpace(serviceAddress(input.Service)) == "" {
+		c.JSON(400, gin.H{"error": "Original address is required"})
 		return
 	}
 
 	if input.Service.ID == "" {
-		input.Service.ID = routeHash(
-			[]byte(input.Service.OriginalAddress),
-		)
+		input.Service.ID = routeHash([]byte(serviceAddress(input.Service)))
 	}
 
-	ctx, cancel := context.WithTimeout(
-		c.Request.Context(),
-		120*time.Second,
-	)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Second)
 	defer cancel()
 
 	if input.Action == "ai_assist" {
-		requestID := newAssistanceRequestID(input.Service.ID)
-		c.Header("X-Route-Assistance-ID", requestID)
-
 		result, err := assistRouteService(
-			ctx,
-			input.Service,
-			requestID,
+			ctx, input.Service, newAssistanceRequestID(input.Service.ID),
 		)
 		if err != nil {
-			status := http.StatusBadGateway
-
-			if errors.Is(err, context.DeadlineExceeded) {
-				status = http.StatusGatewayTimeout
-			}
-
-			c.JSON(status, gin.H{
-				"error":      err.Error(),
-				"request_id": requestID,
-			})
+			c.JSON(502, gin.H{"error": err.Error()})
 			return
 		}
-
-		c.JSON(http.StatusOK, result)
+		c.JSON(200, result)
 		return
 	}
 
-	result := reviewRouteService(
-		ctx,
-		input.Service,
-		input.Confirm,
-	)
-
-	c.JSON(http.StatusOK, gin.H{
-		"service": result,
+	c.JSON(200, gin.H{
+		"service": reviewRouteService(ctx, input.Service, input.Confirm),
 	})
 }

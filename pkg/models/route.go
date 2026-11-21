@@ -26,9 +26,12 @@ type RouteStop struct {
 }
 
 type RouteService struct {
-	ID          uint   `gorm:"primaryKey" json:"id"`
-	StopID      uint   `gorm:"index;not null" json:"stop_id"`
-	ServiceType string `gorm:"not null" json:"service_type"`
+	ID              uint   `gorm:"primaryKey" json:"id"`
+	StopID          uint   `gorm:"index;not null" json:"stop_id"`
+	ServiceID       string `json:"service_id"`
+	SourceReference string `json:"source_reference"`
+	ServiceType     string `gorm:"not null" json:"service_type"`
+	ParcelCount     int    `gorm:"default:1" json:"parcel_count"`
 }
 
 type RouteSegment struct {
