@@ -116,6 +116,10 @@ func main() {
 		)
 		api.POST("/routes/parse", handlers.ParseRouteScreenshots)
 		api.POST("/routes/verify-address", handlers.VerifyRouteAddress)
+		api.GET("/route-planner/settings", authService.GetRouteSettings)
+		api.PUT("/route-planner/settings", authService.SaveRouteSettings)
+		api.GET("/route-planner/areas", authService.SearchRouteAreas)
+
 	}
 
 	router.POST("/alerts/grafana", handlers.GrafanaAlertWebhook)
