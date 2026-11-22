@@ -2,48 +2,47 @@ package handlers
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 )
 
+const routeGeometryEpsilon = 1e-10
+
+type RouteCorner struct {
+	Longitude float64 `json:"longitude"`
+	Latitude  float64 `json:"latitude"`
+}
+
 type RouteArea struct {
-	PlaceID     string  `json:"place_id"`
-	Label       string  `json:"label"`
-	Level       string  `json:"level"`
-	CountryCode string  `json:"country_code"`
-	Latitude    float64 `json:"latitude"`
-	Longitude   float64 `json:"longitude"`
-	OSMID       string  `json:"osm_id,omitempty"`
-	OSMType     string  `json:"osm_type,omitempty"`
+	ID        string        `json:"id"`
+	Type      string        `json:"type"`
+	Label     string        `json:"label"`
+	Latitude  float64       `json:"latitude"`
+	Longitude float64       `json:"longitude"`
+	Corners   []RouteCorner `json:"corners,omitempty"`
+
+	// Compatibility when reading older boundary-based settings.
+	PlaceID     string `json:"place_id,omitempty"`
+	Level       string `json:"level,omitempty"`
+	CountryCode string `json:"country_code,omitempty"`
+	OSMID       string `json:"osm_id,omitempty"`
+	OSMType     string `json:"osm_type,omitempty"`
 }
 
 type RouteSettings struct {
 	Revision  string     `json:"revision"`
 	Area      *RouteArea `json:"area"`
 	UpdatedAt string     `json:"updated_at,omitempty"`
-}
-
-type RouteAreaOption struct {
-	RouteArea
-	SelectionToken string `json:"selection_token"`
-}
-
-type routeAreaClaim struct {
-	UserID    string    `json:"user_id"`
-	ExpiresAt int64     `json:"expires_at"`
-	Area      RouteArea `json:"area"`
 }
 
 type routeSettingsContextKey struct{}
@@ -66,9 +65,11 @@ type geoRouteProperties struct {
 	Lat         float64 `json:"lat"`
 	Lon         float64 `json:"lon"`
 	ResultType  string  `json:"result_type"`
-	Datasource  struct {
+
+	Datasource struct {
 		Raw map[string]any `json:"raw"`
 	} `json:"datasource"`
+
 	Rank struct {
 		Confidence       float64 `json:"confidence"`
 		StreetConfidence float64 `json:"confidence_street_level"`
@@ -80,20 +81,392 @@ func WithRouteSettings(
 	ctx context.Context,
 	settings RouteSettings,
 ) context.Context {
-	return context.WithValue(ctx, routeSettingsContextKey{}, settings)
+	return context.WithValue(
+		ctx,
+		routeSettingsContextKey{},
+		settings,
+	)
 }
 
-func CurrentRouteSettings(ctx context.Context) (RouteSettings, error) {
-	settings, ok := ctx.Value(routeSettingsContextKey{}).(RouteSettings)
+func CurrentRouteSettings(
+	ctx context.Context,
+) (RouteSettings, error) {
+	settings, ok := ctx.Value(
+		routeSettingsContextKey{},
+	).(RouteSettings)
 
-	if !ok || settings.Area == nil ||
-		settings.Area.PlaceID == "" || settings.Revision == "" {
+	if !ok ||
+		settings.Revision == "" ||
+		settings.Area == nil ||
+		settings.Area.ID == "" ||
+		settings.Area.Type != "four_corners" {
 		return RouteSettings{}, errors.New(
-			"Select a geographic area in Route Planner Settings first",
+			"Select and save four working-area corners in Route Planner Settings first",
+		)
+	}
+
+	if err := ValidateRouteCorners(settings.Area.Corners); err != nil {
+		return RouteSettings{}, fmt.Errorf(
+			"Saved working area is invalid: %w",
+			err,
 		)
 	}
 
 	return settings, nil
+}
+
+func finiteRouteCoordinate(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func sameRouteCorner(first, second RouteCorner) bool {
+	return math.Abs(first.Longitude-second.Longitude) <=
+		routeGeometryEpsilon &&
+		math.Abs(first.Latitude-second.Latitude) <=
+			routeGeometryEpsilon
+}
+
+func routeCornerCross(a, b, c RouteCorner) float64 {
+	return (b.Longitude-a.Longitude)*(c.Latitude-a.Latitude) -
+		(b.Latitude-a.Latitude)*(c.Longitude-a.Longitude)
+}
+
+func routeCornerOnSegment(
+	first RouteCorner,
+	second RouteCorner,
+	point RouteCorner,
+) bool {
+	if math.Abs(
+		routeCornerCross(first, second, point),
+	) > routeGeometryEpsilon {
+		return false
+	}
+
+	return point.Longitude >=
+		math.Min(first.Longitude, second.Longitude)-routeGeometryEpsilon &&
+		point.Longitude <=
+			math.Max(first.Longitude, second.Longitude)+routeGeometryEpsilon &&
+		point.Latitude >=
+			math.Min(first.Latitude, second.Latitude)-routeGeometryEpsilon &&
+		point.Latitude <=
+			math.Max(first.Latitude, second.Latitude)+routeGeometryEpsilon
+}
+
+func routeCornerSegmentsIntersect(
+	a RouteCorner,
+	b RouteCorner,
+	c RouteCorner,
+	d RouteCorner,
+) bool {
+	first := routeCornerCross(a, b, c)
+	second := routeCornerCross(a, b, d)
+	third := routeCornerCross(c, d, a)
+	fourth := routeCornerCross(c, d, b)
+
+	crosses := ((first > 0 && second < 0) ||
+		(first < 0 && second > 0)) &&
+		((third > 0 && fourth < 0) ||
+			(third < 0 && fourth > 0))
+
+	return crosses ||
+		routeCornerOnSegment(a, b, c) ||
+		routeCornerOnSegment(a, b, d) ||
+		routeCornerOnSegment(c, d, a) ||
+		routeCornerOnSegment(c, d, b)
+}
+
+func routeSignedCornerArea(corners []RouteCorner) float64 {
+	origin := corners[0]
+	twiceArea := 0.0
+
+	for index, current := range corners {
+		next := corners[(index+1)%len(corners)]
+
+		currentX := current.Longitude - origin.Longitude
+		currentY := current.Latitude - origin.Latitude
+		nextX := next.Longitude - origin.Longitude
+		nextY := next.Latitude - origin.Latitude
+
+		twiceArea += currentX*nextY - nextX*currentY
+	}
+
+	return twiceArea
+}
+
+func ValidateRouteCorners(corners []RouteCorner) error {
+	if len(corners) != 4 {
+		return errors.New(
+			"The working area must contain exactly four corners",
+		)
+	}
+
+	minLongitude := corners[0].Longitude
+	maxLongitude := corners[0].Longitude
+
+	for index, corner := range corners {
+		if !finiteRouteCoordinate(corner.Longitude) ||
+			!finiteRouteCoordinate(corner.Latitude) ||
+			math.Abs(corner.Longitude) > 180 ||
+			math.Abs(corner.Latitude) > 90 {
+			return fmt.Errorf(
+				"Corner %d contains invalid coordinates",
+				index+1,
+			)
+		}
+
+		minLongitude = math.Min(
+			minLongitude,
+			corner.Longitude,
+		)
+		maxLongitude = math.Max(
+			maxLongitude,
+			corner.Longitude,
+		)
+
+		for other := index + 1; other < len(corners); other++ {
+			if sameRouteCorner(corner, corners[other]) {
+				return errors.New(
+					"Each corner must have a different position",
+				)
+			}
+		}
+	}
+
+	if maxLongitude-minLongitude > 180 {
+		return errors.New(
+			"Working areas crossing the international date line are unsupported",
+		)
+	}
+
+	if routeCornerSegmentsIntersect(
+		corners[0], corners[1], corners[2], corners[3],
+	) || routeCornerSegmentsIntersect(
+		corners[1], corners[2], corners[3], corners[0],
+	) {
+		return errors.New(
+			"The working-area edges cross; keep the corners in boundary order",
+		)
+	}
+
+	for index := range corners {
+		previous := corners[(index+3)%4]
+		current := corners[index]
+		next := corners[(index+1)%4]
+
+		if math.Abs(
+			routeCornerCross(previous, current, next),
+		) <= routeGeometryEpsilon {
+			return errors.New(
+				"Three neighbouring corners cannot lie on one straight line",
+			)
+		}
+	}
+
+	if math.Abs(
+		routeSignedCornerArea(corners),
+	) <= routeGeometryEpsilon {
+		return errors.New(
+			"The selected working area is too small or has no area",
+		)
+	}
+
+	return nil
+}
+
+func canonicalRouteCorners(
+	input []RouteCorner,
+) []RouteCorner {
+	corners := append([]RouteCorner(nil), input...)
+
+	if routeSignedCornerArea(corners) < 0 {
+		for first, last := 0, len(corners)-1; first < last; {
+			corners[first], corners[last] =
+				corners[last], corners[first]
+
+			first++
+			last--
+		}
+	}
+
+	start := 0
+
+	for index := 1; index < len(corners); index++ {
+		if corners[index].Longitude < corners[start].Longitude ||
+			(corners[index].Longitude == corners[start].Longitude &&
+				corners[index].Latitude < corners[start].Latitude) {
+			start = index
+		}
+	}
+
+	result := make([]RouteCorner, 0, 4)
+
+	for offset := 0; offset < 4; offset++ {
+		corner := corners[(start+offset)%4]
+
+		if corner.Longitude == 0 {
+			corner.Longitude = 0
+		}
+		if corner.Latitude == 0 {
+			corner.Latitude = 0
+		}
+
+		result = append(result, corner)
+	}
+
+	return result
+}
+
+func routeCornerBounds(
+	corners []RouteCorner,
+) (
+	minLongitude float64,
+	minLatitude float64,
+	maxLongitude float64,
+	maxLatitude float64,
+) {
+	minLongitude = corners[0].Longitude
+	maxLongitude = corners[0].Longitude
+	minLatitude = corners[0].Latitude
+	maxLatitude = corners[0].Latitude
+
+	for _, corner := range corners[1:] {
+		minLongitude = math.Min(minLongitude, corner.Longitude)
+		maxLongitude = math.Max(maxLongitude, corner.Longitude)
+		minLatitude = math.Min(minLatitude, corner.Latitude)
+		maxLatitude = math.Max(maxLatitude, corner.Latitude)
+	}
+
+	return
+}
+
+func NewCornerRouteArea(
+	label string,
+	corners []RouteCorner,
+) (RouteArea, error) {
+	label = strings.TrimSpace(label)
+
+	if len([]rune(label)) < 1 || len([]rune(label)) > 100 {
+		return RouteArea{}, errors.New(
+			"Enter an area name between 1 and 100 characters",
+		)
+	}
+
+	if err := ValidateRouteCorners(corners); err != nil {
+		return RouteArea{}, err
+	}
+
+	// The identifier is independent of corner numbering and winding.
+	canonical := canonicalRouteCorners(corners)
+
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		return RouteArea{}, errors.New("Cannot encode working-area corners")
+	}
+
+	sum := sha256.Sum256(encoded)
+
+	minLongitude, minLatitude, maxLongitude, maxLatitude :=
+		routeCornerBounds(corners)
+
+	return RouteArea{
+		ID:        "corners:" + hex.EncodeToString(sum[:]),
+		Type:      "four_corners",
+		Label:     label,
+		Latitude:  (minLatitude + maxLatitude) / 2,
+		Longitude: (minLongitude + maxLongitude) / 2,
+
+		// Preserve the user's corner numbering in stored settings.
+		Corners: append([]RouteCorner(nil), corners...),
+	}, nil
+}
+
+func RouteAreaSearchFilter(area RouteArea) (string, error) {
+	if area.Type != "four_corners" {
+		return "", errors.New(
+			"Save a four-corner working area first",
+		)
+	}
+
+	if err := ValidateRouteCorners(area.Corners); err != nil {
+		return "", err
+	}
+
+	minLongitude, minLatitude, maxLongitude, maxLatitude :=
+		routeCornerBounds(area.Corners)
+
+	format := func(value float64) string {
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	}
+
+	return "rect:" +
+		format(minLongitude) + "," +
+		format(minLatitude) + "," +
+		format(maxLongitude) + "," +
+		format(maxLatitude), nil
+}
+
+func RoutePointInsideArea(
+	ctx context.Context,
+	area RouteArea,
+	longitude float64,
+	latitude float64,
+) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	if !finiteRouteCoordinate(longitude) ||
+		!finiteRouteCoordinate(latitude) ||
+		math.Abs(longitude) > 180 ||
+		math.Abs(latitude) > 90 {
+		return false, errors.New("Invalid location coordinates")
+	}
+
+	if area.Type != "four_corners" {
+		return false, errors.New(
+			"Save a four-corner working area first",
+		)
+	}
+
+	if err := ValidateRouteCorners(area.Corners); err != nil {
+		return false, err
+	}
+
+	point := RouteCorner{
+		Longitude: longitude,
+		Latitude:  latitude,
+	}
+
+	// Include locations lying on the selected outline.
+	for index, first := range area.Corners {
+		second := area.Corners[(index+1)%4]
+
+		if routeCornerOnSegment(first, second, point) {
+			return true, nil
+		}
+	}
+
+	inside := false
+
+	for index, first := range area.Corners {
+		second := area.Corners[(index+1)%4]
+
+		if (first.Latitude > latitude) ==
+			(second.Latitude > latitude) {
+			continue
+		}
+
+		intersectionLongitude := first.Longitude +
+			(latitude-first.Latitude)*
+				(second.Longitude-first.Longitude)/
+				(second.Latitude-first.Latitude)
+
+		if longitude < intersectionLongitude {
+			inside = !inside
+		}
+	}
+
+	return inside, nil
 }
 
 func geoapifyFeatures(
@@ -106,34 +479,59 @@ func geoapifyFeatures(
 		return nil, errors.New("GEOAPIFY_API_KEY is missing")
 	}
 
-	query.Set("apiKey", key)
+	switch path {
+	case "/v1/geocode/search", "/v1/geocode/reverse":
+	default:
+		return nil, errors.New("Unsupported Geoapify endpoint")
+	}
+
+	parameters := make(url.Values, len(query)+2)
+
+	for name, values := range query {
+		parameters[name] = append([]string(nil), values...)
+	}
+
+	parameters.Set("apiKey", key)
+	parameters.Set("format", "geojson")
 
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		"https://api.geoapify.com"+path+"?"+query.Encode(),
+		"https://api.geoapify.com"+path+"?"+parameters.Encode(),
 		nil,
 	)
 	if err != nil {
-		return nil, errors.New("Cannot create geocoding request")
+		return nil, errors.New("Cannot create Geoapify request")
 	}
+
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := routeGeocodeClient.Do(req)
 	if err != nil {
-		return nil, errors.New("Geographic lookup is unavailable")
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		// Transport errors may contain the URL and API key.
+		return nil, errors.New("Geoapify request failed")
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf(
-			"Geographic lookup HTTP %d",
-			resp.StatusCode,
-		)
+	const maximumBytes = 4 << 20
+
+	raw, err := io.ReadAll(
+		io.LimitReader(resp.Body, maximumBytes+1),
+	)
+	if err != nil || len(raw) > maximumBytes {
+		return nil, errors.New("Invalid Geoapify response size")
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
-	if err != nil || len(raw) > 4<<20 {
-		return nil, errors.New("Invalid geographic response size")
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"Geoapify endpoint %s returned HTTP %d",
+			path,
+			resp.StatusCode,
+		)
 	}
 
 	var result struct {
@@ -145,308 +543,16 @@ func geoapifyFeatures(
 
 	if json.Unmarshal(raw, &result) != nil ||
 		result.Type != "FeatureCollection" {
-		return nil, errors.New("Invalid geographic response")
+		return nil, errors.New(
+			"Geoapify did not return a valid FeatureCollection",
+		)
 	}
 
 	points := make([]geoRouteProperties, 0, len(result.Features))
+
 	for _, feature := range result.Features {
 		points = append(points, feature.Properties)
 	}
 
 	return points, nil
-}
-
-func routeOSMType(value string) string {
-	switch strings.ToLower(value) {
-	case "r", "relation":
-		return "r"
-	case "w", "way":
-		return "w"
-	case "n", "node":
-		return "n"
-	default:
-		return ""
-	}
-}
-
-func routeRawString(raw map[string]any, key string) string {
-	value, exists := raw[key]
-	if !exists || value == nil {
-		return ""
-	}
-
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case float64:
-		return strconv.FormatFloat(typed, 'f', 0, 64)
-	default:
-		return fmt.Sprint(value)
-	}
-}
-
-func routeAreaSigningKey() ([]byte, error) {
-	value := strings.TrimSpace(os.Getenv("UPSTASH_REDIS_REST_TOKEN"))
-	if value == "" {
-		return nil, errors.New("Area-selection signing key is unavailable")
-	}
-
-	sum := sha256.Sum256([]byte("route-area-selection:v1:" + value))
-	return sum[:], nil
-}
-
-func signRouteArea(userID string, area RouteArea) (string, error) {
-	key, err := routeAreaSigningKey()
-	if err != nil {
-		return "", err
-	}
-
-	payload, err := json.Marshal(routeAreaClaim{
-		UserID:    userID,
-		ExpiresAt: time.Now().Add(15 * time.Minute).Unix(),
-		Area:      area,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	encoded := base64.RawURLEncoding.EncodeToString(payload)
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(encoded))
-
-	return encoded + "." +
-		base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
-}
-
-func VerifyRouteAreaSelection(
-	userID string,
-	token string,
-) (RouteArea, error) {
-	if len(token) > 16384 {
-		return RouteArea{}, errors.New("Invalid area selection")
-	}
-
-	parts := strings.Split(token, ".")
-	if len(parts) != 2 {
-		return RouteArea{}, errors.New("Invalid area selection")
-	}
-
-	key, err := routeAreaSigningKey()
-	if err != nil {
-		return RouteArea{}, err
-	}
-
-	signature, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return RouteArea{}, errors.New("Invalid area signature")
-	}
-
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(parts[0]))
-
-	if !hmac.Equal(signature, mac.Sum(nil)) {
-		return RouteArea{}, errors.New("Invalid area signature")
-	}
-
-	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return RouteArea{}, errors.New("Invalid area selection")
-	}
-
-	var claim routeAreaClaim
-	if json.Unmarshal(raw, &claim) != nil ||
-		claim.UserID != userID ||
-		claim.ExpiresAt <= time.Now().Unix() ||
-		claim.Area.PlaceID == "" {
-		return RouteArea{}, errors.New(
-			"Area selection expired; search and select the area again",
-		)
-	}
-
-	return claim.Area, nil
-}
-
-func SearchRouteAreas(
-	ctx context.Context,
-	userID string,
-	text string,
-) ([]RouteAreaOption, error) {
-	text = strings.TrimSpace(text)
-	if len(text) < 3 || len(text) > 200 {
-		return nil, errors.New("Enter between 3 and 200 characters")
-	}
-
-	query := url.Values{
-		"text":   {text},
-		"type":   {"locality"},
-		"filter": {"countrycode:pt"},
-		"lang":   {"pt"},
-		"limit":  {"10"},
-	}
-
-	points, err := geoapifyFeatures(
-		ctx,
-		"/v1/geocode/search",
-		query,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]RouteAreaOption, 0)
-	seen := make(map[string]bool)
-
-	for _, point := range points {
-		if point.PlaceID == "" || seen[point.PlaceID] {
-			continue
-		}
-
-		switch point.ResultType {
-		case "country", "state", "county", "city",
-			"district", "suburb", "postcode":
-		default:
-			continue
-		}
-
-		osmType := routeOSMType(
-			routeRawString(point.Datasource.Raw, "osm_type"),
-		)
-
-		// A settlement node is a point, not a delimited search boundary.
-		// Offer only relation/way areas.
-		if osmType != "r" && osmType != "w" {
-			continue
-		}
-
-		area := RouteArea{
-			PlaceID:     point.PlaceID,
-			Label:       point.Formatted,
-			Level:       point.ResultType,
-			CountryCode: point.CountryCode,
-			Latitude:    point.Lat,
-			Longitude:   point.Lon,
-			OSMID:       routeRawString(point.Datasource.Raw, "osm_id"),
-			OSMType:     osmType,
-		}
-
-		if area.Label == "" {
-			area.Label = point.Name
-		}
-
-		token, signErr := signRouteArea(userID, area)
-		if signErr != nil {
-			return nil, signErr
-		}
-
-		seen[point.PlaceID] = true
-
-		result = append(result, RouteAreaOption{
-			RouteArea:      area,
-			SelectionToken: token,
-		})
-	}
-
-	return result, nil
-}
-
-type routeMembershipEntry struct {
-	Inside  bool
-	Expires time.Time
-}
-
-var routeMembershipCache = struct {
-	sync.Mutex
-	Entries map[string]routeMembershipEntry
-}{
-	Entries: make(map[string]routeMembershipEntry),
-}
-
-func RoutePointInsideArea(
-	ctx context.Context,
-	area RouteArea,
-	longitude float64,
-	latitude float64,
-) (bool, error) {
-	if !validPoint(RouteInputStop{
-		Longitude: longitude,
-		Latitude:  latitude,
-	}) {
-		return false, errors.New("Invalid coordinates")
-	}
-
-	cacheKey := fmt.Sprintf(
-		"%s:%s:%s",
-		area.PlaceID,
-		strconv.FormatFloat(longitude, 'g', -1, 64),
-		strconv.FormatFloat(latitude, 'g', -1, 64),
-	)
-
-	routeMembershipCache.Lock()
-	cached, exists := routeMembershipCache.Entries[cacheKey]
-	routeMembershipCache.Unlock()
-
-	if exists && time.Now().Before(cached.Expires) {
-		return cached.Inside, nil
-	}
-
-	query := url.Values{
-		"lon": {
-			strconv.FormatFloat(longitude, 'g', -1, 64),
-		},
-		"lat": {
-			strconv.FormatFloat(latitude, 'g', -1, 64),
-		},
-		"boundaries": {"administrative,postal_code"},
-		"geometry":   {"point"},
-		"lang":       {"pt"},
-	}
-
-	boundaries, err := geoapifyFeatures(
-		ctx,
-		"/v1/boundaries/part-of",
-		query,
-	)
-	if err != nil {
-		return false, err
-	}
-
-	inside := false
-
-	for _, boundary := range boundaries {
-		if boundary.PlaceID == area.PlaceID {
-			inside = true
-			break
-		}
-
-		osmID := routeRawString(
-			boundary.Datasource.Raw,
-			"osm_id",
-		)
-		osmType := routeOSMType(routeRawString(
-			boundary.Datasource.Raw,
-			"osm_type",
-		))
-
-		if area.OSMID != "" && area.OSMType != "" &&
-			osmID == area.OSMID && osmType == area.OSMType {
-			inside = true
-			break
-		}
-	}
-
-	routeMembershipCache.Lock()
-
-	if len(routeMembershipCache.Entries) >= 4096 {
-		routeMembershipCache.Entries =
-			make(map[string]routeMembershipEntry)
-	}
-
-	routeMembershipCache.Entries[cacheKey] = routeMembershipEntry{
-		Inside:  inside,
-		Expires: time.Now().Add(30 * time.Minute),
-	}
-
-	routeMembershipCache.Unlock()
-
-	return inside, nil
 }
