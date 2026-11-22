@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import RouteAreaPicker, {
   polygonCorners,
   validateAreaPolygon,
-} from './RouteAreaPicker';
+} from './RoutePlannerPicker';
 
 function savedPolygon(settings) {
   const polygon = settings?.area?.polygon;
@@ -18,7 +18,8 @@ function defaultLabel(settings) {
 }
 
 function errorMessage(error) {
-  const message = error?.response?.data?.error ||
+  const message =
+    error?.response?.data?.error ||
     error?.message ||
     'Cannot save the selected area.';
 
@@ -104,7 +105,9 @@ export default function RoutePlannerSettings({
     const areaLabel = label.trim();
 
     if (!areaLabel || areaLabel.length > 100) {
-      setError('Enter an area name between 1 and 100 characters.');
+      setError(
+        'Enter an area name between 1 and 100 characters.'
+      );
       return;
     }
 
@@ -124,14 +127,20 @@ export default function RoutePlannerSettings({
   async function reload() {
     if (dirty) {
       setError(
-        'Restore the saved area before reloading, or save your draft first.'
+        'Restore the saved area before reloading, ' +
+        'or save your draft first.'
       );
       return;
     }
 
     setError('');
     setNotice('');
-    await onReload();
+
+    try {
+      await onReload();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    }
   }
 
   const validationError = polygon
@@ -154,8 +163,8 @@ export default function RoutePlannerSettings({
 
         <p className="mt-2 text-sm text-slate-400">
           Define your delivery area using four draggable corners.
-          Address searches and delivery destinations will be restricted
-          to the saved outline.
+          Address searches and delivery destinations will be
+          restricted to the saved outline.
         </p>
       </div>
 
@@ -211,15 +220,18 @@ export default function RoutePlannerSettings({
       />
 
       {dirty && (
-        <p role="status" className="text-sm text-amber-200">
+        <p
+          role="status"
+          className="text-sm text-amber-200"
+        >
           Unsaved draft. The previously saved area remains active.
         </p>
       )}
 
       <p className="text-sm text-slate-400">
         Saving a different area preserves extracted services and
-        historical journeys. Addresses must pass the new area and road
-        checks before they can be routed again.
+        historical journeys. Addresses must pass the new area and
+        road checks before they can be routed again.
       </p>
 
       <div className="flex flex-wrap gap-3">
@@ -277,8 +289,8 @@ export default function RoutePlannerSettings({
 
       <p className="text-sm text-slate-400">
         Settings are stored per account separately from journey
-        retention. The selected area does not expand OSRM’s available
-        road map.
+        retention. The selected area does not expand OSRM’s
+        available road map.
       </p>
     </section>
   );
