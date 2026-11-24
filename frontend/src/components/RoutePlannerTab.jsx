@@ -10,36 +10,36 @@ import { API } from '../services/http';
 import { usePlanner } from '../services/plannerStore';
 import RouteLocationPicker from './RouteLocationPicker';
 import RoutePlannerSettings from './RoutePlannerSettings';
+import RouteDeliveryMap, {
+  classifyDeliveryLocality,
+  deliverySection,
+} from './RouteDeliveryMap';
 
 const POLICY = 'selected-area-resolution-v3';
 
+const SECTION_NAMES = {
+  city: 'Sabugal city',
+  villages: 'Villages',
+};
+
 function addressOf(service) {
-  return String(
-    service?.original_address || service?.address || ''
-  ).trim();
+  return String(service?.original_address || service?.address || '').trim();
 }
 
 function validPoint(point) {
-  if (
-    point?.latitude == null ||
-    point?.longitude == null ||
-    String(point.latitude).trim() === '' ||
-    String(point.longitude).trim() === ''
-  ) return false;
-
-  const latitude = Number(point.latitude);
-  const longitude = Number(point.longitude);
-
-  return Number.isFinite(latitude) &&
-    Number.isFinite(longitude) &&
-    Math.abs(latitude) <= 90 &&
-    Math.abs(longitude) <= 180 &&
-    !(latitude === 0 && longitude === 0);
+  return point?.latitude != null &&
+    point?.longitude != null &&
+    String(point.latitude).trim() !== '' &&
+    String(point.longitude).trim() !== '' &&
+    Number.isFinite(Number(point.latitude)) &&
+    Number.isFinite(Number(point.longitude)) &&
+    Math.abs(Number(point.latitude)) <= 90 &&
+    Math.abs(Number(point.longitude)) <= 180 &&
+    !(Number(point.latitude) === 0 && Number(point.longitude) === 0);
 }
 
 function coordinateKey(point) {
-  return `${Number(point.latitude).toFixed(6)},` +
-    `${Number(point.longitude).toFixed(6)}`;
+  return `${Number(point.latitude).toFixed(6)},${Number(point.longitude).toFixed(6)}`;
 }
 
 function correctionKey(areaID, address) {
@@ -51,9 +51,7 @@ function correctionKey(areaID, address) {
 }
 
 function errorMessage(error) {
-  return error?.response?.data?.error ||
-    error?.message ||
-    'Request failed';
+  return error?.response?.data?.error || error?.message || 'Request failed';
 }
 
 function normalizeService(service, index = 0) {
@@ -61,9 +59,7 @@ function normalizeService(service, index = 0) {
     ...service,
     id: service.id || `legacy-${index}`,
     original_address: addressOf(service),
-    candidates: Array.isArray(service.candidates)
-      ? service.candidates
-      : [],
+    candidates: Array.isArray(service.candidates) ? service.candidates : [],
     parcel_count: Math.max(1, Number(service.parcel_count) || 1),
   };
 }
@@ -84,7 +80,7 @@ function servicesOf(state) {
   }, index));
 }
 
-function readyToRoute(service, revision) {
+function locationReady(service, revision) {
   if (
     !revision ||
     service.status !== 'ready' ||
@@ -104,19 +100,20 @@ function readyToRoute(service, revision) {
   }
 
   const selected = service.candidates.filter(
-    (candidate) =>
-      candidate.id === service.resolution.selected_candidate_id
+    (candidate) => candidate.id === service.resolution.selected_candidate_id
   );
 
   return selected.length === 1 &&
     selected[0].in_selected_area === true &&
     selected[0].can_confirm === true &&
-    Math.abs(
-      Number(selected[0].latitude) - Number(service.latitude)
-    ) < 0.0000001 &&
-    Math.abs(
-      Number(selected[0].longitude) - Number(service.longitude)
-    ) < 0.0000001;
+    Math.abs(Number(selected[0].latitude) - Number(service.latitude)) < 1e-7 &&
+    Math.abs(Number(selected[0].longitude) - Number(service.longitude)) < 1e-7;
+}
+
+function readyToRoute(service, revision) {
+  return locationReady(service, revision) &&
+    deliverySection(service) !== 'review' &&
+    !service.routing_section_error;
 }
 
 function withServices(state, services, revision) {
@@ -129,8 +126,7 @@ function withServices(state, services, revision) {
       readyToRoute(service, revision)
     ),
     incomplete: normalized.filter((service) =>
-      service.status !== 'excluded' &&
-      !readyToRoute(service, revision)
+      service.status !== 'excluded' && !readyToRoute(service, revision)
     ),
   };
 }
@@ -138,9 +134,7 @@ function withServices(state, services, revision) {
 function invalidateArea(state, revision) {
   const services = servicesOf(state).map((service) => ({
     ...service,
-    status: service.status === 'excluded'
-      ? 'excluded'
-      : 'needs_attention',
+    status: service.status === 'excluded' ? 'excluded' : 'needs_attention',
     stage: 'extracted',
     candidates: [],
     latitude: null,
@@ -152,9 +146,10 @@ function invalidateArea(state, revision) {
     location_precision: '',
     matched_address: '',
     resolution: null,
+    routing_section_error: '',
     reason: service.status === 'excluded'
       ? service.reason
-      : 'The search area changed; verify this address again.',
+      : 'The working area changed; verify this address again.',
   }));
 
   return {
@@ -171,22 +166,35 @@ function destinationsOf(services, revision) {
   for (const service of services) {
     if (!readyToRoute(service, revision)) continue;
 
-    const key = coordinateKey(service);
+    const section = deliverySection(service);
+    const key = `${section}:${coordinateKey(service)}`;
 
     if (!grouped.has(key)) {
       grouped.set(key, {
+        id: key,
         address: service.matched_address || addressOf(service),
+        locality: service.locality || '',
+        section,
+        section_override: false,
         latitude: Number(service.latitude),
         longitude: Number(service.longitude),
         services: [],
       });
     }
 
-    grouped.get(key).services.push({
+    const destination = grouped.get(key);
+
+    destination.section_override ||= Boolean(
+      service.routing_section_override
+    );
+
+    destination.services.push({
       id: service.id,
       source_reference: service.source_reference || '',
+      original_address: addressOf(service),
       service_type: service.service_type || 'unknown',
       parcel_count: service.parcel_count,
+      location_precision: service.location_precision || '',
     });
   }
 
@@ -195,22 +203,225 @@ function destinationsOf(services, revision) {
 
 function searchURL(query) {
   return 'https://www.google.com/maps/search/?' +
-    new URLSearchParams({ api: '1', query }).toString();
+    new URLSearchParams({ api: '1', query });
 }
 
 function directionsURL(point) {
-  return 'https://www.google.com/maps/dir/?' +
-    new URLSearchParams({
-      api: '1',
-      destination: `${point.latitude},${point.longitude}`,
-      travelmode: 'driving',
-    }).toString();
+  return 'https://www.google.com/maps/dir/?' + new URLSearchParams({
+    api: '1',
+    destination: `${point.latitude},${point.longitude}`,
+    travelmode: 'driving',
+  });
+}
+
+function ServiceCard({
+  service,
+  revision,
+  disabled,
+  networkDisabled,
+  selected,
+  message,
+  onSelect,
+  onSection,
+  onAI,
+  onRetry,
+  onPick,
+  onConfirm,
+  onExclude,
+}) {
+  const section = deliverySection(service);
+  const automatic = classifyDeliveryLocality(service.locality);
+  const ready = readyToRoute(service, revision);
+
+  return (
+    <article className="space-y-3 rounded-xl border border-white/15 p-4">
+      <label className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          checked={selected}
+          disabled={disabled || service.status === 'excluded'}
+          onChange={onSelect}
+          className="mt-1"
+        />
+        <span className="font-semibold">
+          {addressOf(service) || 'Address obscured'}
+        </span>
+      </label>
+
+      <p className="text-sm text-slate-400">
+        {service.source_reference ? `Shipment ${service.source_reference} · ` : ''}
+        {service.service_type || 'unknown'} · {service.parcel_count} parcels
+      </p>
+
+      <p className="text-sm">
+        Locality: <strong>{service.locality || 'Missing'}</strong>
+      </p>
+
+      <label className="block space-y-2">
+        <span className="text-sm">Routing section</span>
+        <select
+          className="terminal-input w-full"
+          value={service.routing_section_override || ''}
+          disabled={disabled}
+          onChange={(event) => onSection(event.target.value)}
+        >
+          <option value="">
+            Automatic: {SECTION_NAMES[automatic] || 'Choose a section'}
+          </option>
+          <option value="city">Sabugal city</option>
+          <option value="villages">Villages</option>
+        </select>
+      </label>
+
+      <p className="text-sm">
+        Section: <strong>{SECTION_NAMES[section] || 'Needs choosing'}</strong>
+      </p>
+
+      {ready && service.location_precision === 'street' && (
+        <p className="text-amber-200">Street-level location</p>
+      )}
+
+      {!ready && (
+        <p className="text-amber-200">
+          {service.routing_section_error ||
+            (section === 'review'
+              ? 'Choose City or Villages for this address.'
+              : service.reason || 'Verify this address before routing.')}
+        </p>
+      )}
+
+      {service.matched_address && (
+        <p className="text-sm">Matched: {service.matched_address}</p>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          className="terminal-button"
+          disabled={networkDisabled || service.status === 'excluded'}
+          onClick={onAI}
+        >
+          Ask AI about this address
+        </button>
+
+        <button
+          className="terminal-button-secondary"
+          disabled={networkDisabled}
+          onClick={() => onRetry(false)}
+        >
+          Retry address lookup
+        </button>
+
+        <button
+          className="terminal-button-secondary"
+          disabled={networkDisabled}
+          onClick={onPick}
+        >
+          Choose location on map
+        </button>
+
+        {service.confirmation && (
+          <button
+            className="terminal-button-secondary"
+            disabled={networkDisabled}
+            onClick={() => onRetry(true)}
+          >
+            Check saved pin
+          </button>
+        )}
+
+        <button
+          className="terminal-button-secondary"
+          disabled={disabled}
+          onClick={onExclude}
+        >
+          {service.status === 'excluded'
+            ? 'Restore to journey'
+            : 'Exclude from this journey'}
+        </button>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <a
+          className="terminal-button-secondary"
+          href={searchURL(`${addressOf(service)}, Portugal`)}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Search in Google Maps
+        </a>
+
+        {ready && (
+          <a
+            className="terminal-button-secondary"
+            href={directionsURL(service)}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Navigate to checked location
+          </a>
+        )}
+      </div>
+
+      {message && <p role="status" className="text-sm">{message}</p>}
+
+      {!ready && service.candidates.length > 0 && (
+        <details>
+          <summary className="cursor-pointer">Review candidates</summary>
+
+          <div className="mt-3 space-y-3">
+            {service.candidates.filter((candidate) =>
+              candidate.in_selected_area === true
+            ).map((candidate) => (
+              <div key={candidate.id} className="space-y-2 rounded border border-white/15 p-3">
+                <p>{candidate.address}</p>
+                <p className="text-sm text-slate-400">
+                  {candidate.result_type}
+                </p>
+                <a
+                  href={searchURL(`${candidate.latitude},${candidate.longitude}`)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="terminal-button-secondary inline-block"
+                >
+                  Inspect in Google Maps
+                </a>
+                <button
+                  className="terminal-button-secondary"
+                  disabled={networkDisabled || !candidate.can_confirm}
+                  onClick={() => onConfirm(candidate)}
+                >
+                  Confirm this location
+                </button>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      <details>
+        <summary className="cursor-pointer">Address and AI details</summary>
+        <pre className="mt-3 overflow-auto whitespace-pre-wrap break-words text-xs">
+          {JSON.stringify({
+            original_address: addressOf(service),
+            original_evidence: service.original_addresses,
+            street: service.street,
+            house_number: service.house_number,
+            postcode: service.postal_code,
+            locality: service.locality,
+            issues: service.extraction_issues,
+            resolution: service.resolution,
+          }, null, 2)}
+        </pre>
+      </details>
+    </article>
+  );
 }
 
 export default function RoutePlannerTab() {
   const { store, view, identity } = usePlanner();
 
   const [page, setPage] = useState('planner');
+  const [mapSection, setMapSection] = useState('city');
   const [settings, setSettings] = useState(null);
   const [settingsError, setSettingsError] = useState('');
   const [settingsLoading, setSettingsLoading] = useState(false);
@@ -220,7 +431,6 @@ export default function RoutePlannerTab() {
   const [picker, setPicker] = useState(null);
   const [selectedIDs, setSelectedIDs] = useState([]);
   const [messages, setMessages] = useState({});
-  const [roundTrip, setRoundTrip] = useState(false);
 
   const busy = useRef(false);
   const settingsRef = useRef(null);
@@ -229,6 +439,8 @@ export default function RoutePlannerTab() {
   const revision = settings?.revision || '';
   const canConnect = online && !identity.localOnly;
   const configured = Boolean(settings?.area && revision);
+  const disabled = Boolean(working);
+  const networkDisabled = disabled || !canConnect || !configured;
 
   const services = useMemo(() => servicesOf(state), [state]);
   const destinations = useMemo(
@@ -236,16 +448,14 @@ export default function RoutePlannerTab() {
     [services, revision]
   );
 
-  const ready = services.filter((service) =>
-    readyToRoute(service, revision)
-  );
+  const ready = services.filter((service) => readyToRoute(service, revision));
   const attention = services.filter((service) =>
-    service.status !== 'excluded' &&
-    !readyToRoute(service, revision)
+    service.status !== 'excluded' && !readyToRoute(service, revision)
   );
-  const excluded = services.filter((service) =>
-    service.status === 'excluded'
-  );
+  const excluded = services.filter((service) => service.status === 'excluded');
+
+  const cityDestinations = destinations.filter((stop) => stop.section === 'city');
+  const villageDestinations = destinations.filter((stop) => stop.section === 'villages');
 
   const listTab = state?.tab || 'complete';
   const shown = listTab === 'complete'
@@ -258,6 +468,48 @@ export default function RoutePlannerTab() {
     (plan) => plan.id === state.selectedId
   );
 
+  const planStops = useMemo(
+    () => [...(selectedPlan?.stops || [])].sort((a, b) => a.sequence - b.sequence),
+    [selectedPlan]
+  );
+
+  const hasSectionPlan = Boolean(
+    selectedPlan && planStops.some((stop) =>
+      stop.section === 'city' || stop.section === 'villages'
+    )
+  );
+
+  const mapStops = hasSectionPlan
+    ? planStops.filter((stop) =>
+        stop.section === mapSection && !stop.is_origin && !stop.is_return
+      )
+    : mapSection === 'city'
+      ? cityDestinations
+      : villageDestinations;
+
+  const mapContext = hasSectionPlan
+    ? planStops.filter((stop) => stop.section === 'city' && !stop.is_return)
+    : cityDestinations;
+
+  const mapOrigin = hasSectionPlan
+    ? planStops.find((stop) => stop.is_origin) || state?.origin
+    : state?.origin;
+
+  const ruralPath = useMemo(() => {
+    if (!hasSectionPlan) return [];
+
+    const indices = planStops
+      .map((stop, index) => stop.section === 'villages' ? index : -1)
+      .filter((index) => index >= 0);
+
+    if (!indices.length) return [];
+
+    return planStops.slice(
+      Math.max(0, indices[0] - 1),
+      indices[indices.length - 1] + 1
+    );
+  }, [hasSectionPlan, planStops]);
+
   const loadSettings = useCallback(async () => {
     if (identity.localOnly || !navigator.onLine) return;
 
@@ -269,8 +521,7 @@ export default function RoutePlannerTab() {
         timeout: 15000,
       });
 
-      if (!data.settings ||
-        typeof data.settings.revision !== 'string') {
+      if (!data.settings || typeof data.settings.revision !== 'string') {
         throw new Error('The updated route-settings backend is required.');
       }
 
@@ -278,7 +529,6 @@ export default function RoutePlannerTab() {
       setSettings(data.settings);
     } catch (failure) {
       setSettingsError(errorMessage(failure));
-
       if (failure.response?.status === 401) {
         window.dispatchEvent(new Event('auth:expired'));
       }
@@ -294,7 +544,7 @@ export default function RoutePlannerTab() {
   useEffect(() => {
     const update = () => {
       setOnline(navigator.onLine);
-      if (navigator.onLine) void loadSettings();
+      if (navigator.onLine && !busy.current) void loadSettings();
     };
 
     const visible = () => {
@@ -349,7 +599,6 @@ export default function RoutePlannerTab() {
       if (failure.response?.status === 401) {
         window.dispatchEvent(new Event('auth:expired'));
       }
-
       if (failure.response?.data?.code === 'AREA_CHANGED') {
         await loadSettings();
         setPage('settings');
@@ -361,13 +610,11 @@ export default function RoutePlannerTab() {
   }
 
   function operationRevision() {
-    if (!canConnect) {
-      throw new Error('Reconnect and sign in first.');
-    }
+    if (!canConnect) throw new Error('Reconnect and sign in first.');
 
     const current = settingsRef.current;
     if (!current?.area || !current.revision) {
-      throw new Error('Select a geographic area in Settings first.');
+      throw new Error('Save a working area in Settings first.');
     }
 
     return current.revision;
@@ -375,21 +622,24 @@ export default function RoutePlannerTab() {
 
   function assertRevision(expected) {
     if (settingsRef.current?.revision !== expected) {
-      throw new Error('The search area changed; the old result was discarded.');
+      throw new Error('The working area changed; the old result was discarded.');
     }
   }
 
-  async function replaceService(result, expectedRevision) {
-    assertRevision(expectedRevision);
+  async function replaceService(result, expected) {
+    assertRevision(expected);
 
     await store.change((current) => ({
-      ...withServices(
-        current,
-        servicesOf(current).map((service) =>
-          service.id === result.id ? normalizeService(result) : service
-        ),
-        expectedRevision
-      ),
+      ...withServices(current, servicesOf(current).map((service) =>
+        service.id === result.id
+          ? {
+              ...service,
+              ...normalizeService(result),
+              routing_section_override: service.routing_section_override || '',
+              routing_section_error: '',
+            }
+          : service
+      ), expected),
       error: '',
     }));
   }
@@ -423,10 +673,10 @@ export default function RoutePlannerTab() {
 
   async function askAI(ids) {
     await perform('Reviewing selected addresses with AI', async () => {
-      const initial = servicesOf(store.getSnapshot().record.state);
-      const requested = initial.filter((service) =>
-        ids.includes(service.id) && service.status !== 'excluded'
-      );
+      const requested = servicesOf(store.getSnapshot().record.state)
+        .filter((service) =>
+          ids.includes(service.id) && service.status !== 'excluded'
+        );
 
       for (const service of requested) {
         try {
@@ -435,9 +685,7 @@ export default function RoutePlannerTab() {
             [service.id]: 'Requesting a fresh AI review…',
           }));
 
-          const { data, expected } = await review(
-            service, null, 'ai_assist'
-          );
+          const { data, expected } = await review(service, null, 'ai_assist');
 
           if (data.ai_attempted !== true || !data.request_id) {
             throw new Error('Backend did not confirm an AI request.');
@@ -447,9 +695,9 @@ export default function RoutePlannerTab() {
 
           setMessages((previous) => ({
             ...previous,
-            [service.id]: readyToRoute(data.service, expected)
-              ? 'AI review and road validation passed.'
-              : `Needs attention: ${data.service.reason || 'Unresolved address'}`,
+            [service.id]: locationReady(data.service, expected)
+              ? 'Address and road checks passed.'
+              : data.service.reason || 'Address still needs attention.',
           }));
         } catch (failure) {
           setMessages((previous) => ({
@@ -473,33 +721,26 @@ export default function RoutePlannerTab() {
     };
 
     const { data, expected } = await review(service, confirmation);
-    assertRevision(expected);
+    const areaID = settingsRef.current.area.id || settingsRef.current.area.place_id;
 
-    const areaID =
-  settingsRef.current.area.id ||
-  settingsRef.current.area.place_id;
-
-    await store.change((current) => {
-      const next = withServices(
-        current,
-        servicesOf(current).map((item) =>
-          item.id === service.id ? data.service : item
-        ),
-        expected
-      );
-
-      return {
-        ...next,
-        corrections: {
-          ...(current.corrections || {}),
-          ...(readyToRoute(data.service, expected)
-            ? {
-                [correctionKey(areaID, addressOf(service))]: confirmation,
-              }
-            : {}),
-        },
-      };
-    });
+    await store.change((current) => ({
+      ...withServices(current, servicesOf(current).map((item) =>
+        item.id === service.id
+          ? {
+              ...item,
+              ...data.service,
+              routing_section_override: item.routing_section_override || '',
+              routing_section_error: '',
+            }
+          : item
+      ), expected),
+      corrections: {
+        ...(current.corrections || {}),
+        ...(locationReady(data.service, expected)
+          ? { [correctionKey(areaID, addressOf(service))]: confirmation }
+          : {}),
+      },
+    }));
 
     setPicker(null);
   }
@@ -516,9 +757,7 @@ export default function RoutePlannerTab() {
       if (
         files.length > 10 ||
         files.some((file) => file.size > 10 * 1024 * 1024)
-      ) {
-        throw new Error('Choose up to 10 screenshots, each at most 10 MiB.');
-      }
+      ) throw new Error('Choose up to 10 screenshots, each at most 10 MiB.');
 
       const form = new FormData();
       form.append('area_revision', expected);
@@ -530,8 +769,7 @@ export default function RoutePlannerTab() {
 
       assertRevision(expected);
 
-      if (!Array.isArray(data.services) ||
-        data.area_revision !== expected) {
+      if (!Array.isArray(data.services) || data.area_revision !== expected) {
         throw new Error('Backend returned an incompatible screenshot result.');
       }
 
@@ -548,25 +786,19 @@ export default function RoutePlannerTab() {
       setMessages({});
 
       const snapshot = store.getSnapshot().record.state;
-      const areaID =
-  settingsRef.current.area.id ||
-  settingsRef.current.area.place_id;
+      const areaID = settingsRef.current.area.id || settingsRef.current.area.place_id;
 
       for (const service of servicesOf(snapshot)) {
         const saved = snapshot.corrections?.[
           correctionKey(areaID, addressOf(service))
         ];
-
         if (!saved) continue;
 
         try {
-          const reviewed = await review(service, saved);
-          await replaceService(reviewed.data.service, expected);
+          const result = await review(service, saved);
+          await replaceService(result.data.service, expected);
         } catch (failure) {
-          if (failure.response?.data?.code === 'AREA_CHANGED') {
-            throw failure;
-          }
-          // The extracted record remains available for explicit retry.
+          if (failure.response?.data?.code === 'AREA_CHANGED') throw failure;
         }
       }
     });
@@ -607,11 +839,9 @@ export default function RoutePlannerTab() {
   }
 
   function mapInitial(service = null) {
-    const candidate = service?.candidates?.find(validPoint);
-
     return [
       service,
-      candidate,
+      service?.candidates?.find(validPoint),
       state?.origin,
       settings?.area,
     ].find(validPoint) || { latitude: 0, longitude: 0 };
@@ -625,22 +855,23 @@ export default function RoutePlannerTab() {
     if (!validPoint(current.origin)) {
       throw new Error('Choose or refresh your starting location.');
     }
-
-    if (!stops.length) {
-      throw new Error('There are no ready destinations.');
-    }
+    if (!stops.length) throw new Error('There are no ready destinations.');
 
     try {
       const { data } = await API.post('/routes', {
         area_revision: expected,
-        round_trip: roundTrip,
+        round_trip: Boolean(current.round_trip),
+        maps_limit: Number(current.maps_limit) || 10,
+        section_order: current.section_order === 'city,villages'
+          ? ['city', 'villages']
+          : ['villages', 'city'],
         stops: [{
           address: 'Starting location',
           latitude: Number(current.origin.latitude),
           longitude: Number(current.origin.longitude),
           services: [],
         }, ...stops],
-      }, { timeout: 190000 });
+      }, { timeout: 250000 });
 
       assertRevision(expected);
 
@@ -648,28 +879,24 @@ export default function RoutePlannerTab() {
         throw new Error('Backend returned an invalid journey.');
       }
 
-      const plan = {
-        ...data,
-        area_revision: expected,
-        area_label: settingsRef.current.area.label,
-      };
-
       await store.change((latest) => ({
         ...latest,
-        plans: [plan, ...(latest.plans || [])],
-        selectedId: plan.id,
+        plans: [{
+          ...data,
+          area_revision: expected,
+          area_label: settingsRef.current.area.label,
+        }, ...(latest.plans || [])],
+        selectedId: data.id,
         error: '',
       }));
     } catch (failure) {
-      const issues = failure.response?.data?.issues || [];
       const affected = new Map();
 
-      for (const issue of issues) {
+      for (const issue of failure.response?.data?.issues || []) {
         if (issue.is_origin) {
           await store.change((latest) => ({
             ...latest,
-            originError: issue.message ||
-              'Starting location failed road validation.',
+            originError: issue.message || 'Starting location failed validation.',
           }));
         }
 
@@ -679,21 +906,30 @@ export default function RoutePlannerTab() {
       }
 
       if (affected.size) {
+        const sectionProblem = failure.response?.data?.code === 'SECTION_CONFLICT';
+
         await store.change((latest) => withServices(
           latest,
-          servicesOf(latest).map((service) =>
-            affected.has(service.id)
-              ? {
-                  ...service,
-                  status: 'needs_attention',
-                  reason: affected.get(service.id),
-                  resolution: {
-                    ...service.resolution,
-                    road_checked_at: '',
-                  },
-                }
-              : service
-          ),
+          servicesOf(latest).map((service) => {
+            if (!affected.has(service.id)) return service;
+
+            if (sectionProblem) {
+              return {
+                ...service,
+                routing_section_error: affected.get(service.id),
+              };
+            }
+
+            return {
+              ...service,
+              status: 'needs_attention',
+              reason: affected.get(service.id),
+              resolution: {
+                ...service.resolution,
+                road_checked_at: '',
+              },
+            };
+          }),
           expected
         ));
       }
@@ -702,86 +938,85 @@ export default function RoutePlannerTab() {
     }
   }
 
-async function applyArea(selection) {
-  if (busy.current) {
-    throw new Error('Wait for the current operation.');
-  }
+  async function applyArea(selection) {
+    if (busy.current) throw new Error('Wait for the current operation.');
+    if (!canConnect) throw new Error('Reconnect and sign in first.');
 
-  if (!canConnect) {
-    throw new Error('Reconnect and sign in to save the area.');
-  }
+    busy.current = true;
+    setWorking('Saving working area');
+    setError('');
 
-  if (
-    !selection?.polygon ||
-    selection.polygon.type !== 'Polygon'
-  ) {
-    throw new Error('Draw a valid delivery area first.');
-  }
-
-  busy.current = true;
-  setWorking('Saving delivery area');
-  setError('');
-
-  try {
-    const { data } = await API.put(
-      '/route-planner/settings',
-      {
-        expected_revision:
-          settingsRef.current?.revision || '',
+    try {
+      const { data } = await API.put('/route-planner/settings', {
+        expected_revision: settingsRef.current?.revision || '',
         label: selection.label,
         polygon: selection.polygon,
-      },
-      { timeout: 20000 }
-    );
+      }, { timeout: 20000 });
 
-    const saved = data.settings;
+      const saved = data.settings;
 
-    if (
-      !saved?.revision ||
-      saved.area?.type !== 'polygon' ||
-      !saved.area.id ||
-      saved.area.polygon?.type !== 'Polygon'
-    ) {
-      throw new Error(
-        'The backend did not confirm a saved polygon. ' +
-        'Deploy the polygon-settings backend before saving areas.'
-      );
+      if (!saved?.revision || !saved.area?.id || !saved.area.polygon) {
+        throw new Error('Backend did not confirm the saved working area.');
+      }
+
+      settingsRef.current = saved;
+      setSettings(saved);
+
+      if (store.getSnapshot().record) {
+        await store.change((current) =>
+          invalidateArea(current, saved.revision)
+        );
+      }
+
+      setSelectedIDs([]);
+      setMessages({});
+      setPicker(null);
+    } catch (failure) {
+      if (failure.response?.data?.code === 'AREA_CHANGED') {
+        await loadSettings();
+      }
+      throw failure;
+    } finally {
+      busy.current = false;
+      setWorking('');
     }
-
-    // The server has saved the preference successfully.
-    settingsRef.current = saved;
-    setSettings(saved);
-
-    if (store.getSnapshot().record) {
-      await store.change((current) =>
-        invalidateArea(current, saved.revision)
-      );
-    }
-
-    setSelectedIDs([]);
-    setMessages({});
-    setPicker(null);
-  } catch (failure) {
-    if (failure.response?.data?.code === 'AREA_CHANGED') {
-      await loadSettings();
-    }
-
-    throw failure;
-  } finally {
-    busy.current = false;
-    setWorking('');
   }
-}
+
+  async function changeSection(service, override) {
+    await store.change((current) => ({
+      ...withServices(
+        current,
+        servicesOf(current).map((item) => ({
+          ...item,
+          routing_section_error: '',
+          ...(item.id === service.id
+            ? { routing_section_override: override }
+            : {}),
+        })),
+        revision
+      ),
+      selectedId: null,
+    }));
+  }
+
   async function toggleExcluded(service) {
     const restored = service.status === 'excluded';
 
-    await replaceService({
-      ...service,
-      status: restored ? 'needs_attention' : 'excluded',
-      reason: restored
-        ? 'Restored; verify this address before routing.'
-        : 'Explicitly excluded from this journey.',
-    }, revision);
+    await store.change((current) => withServices(
+      current,
+      servicesOf(current).map((item) =>
+        item.id === service.id
+          ? {
+              ...item,
+              status: restored ? 'needs_attention' : 'excluded',
+              reason: restored
+                ? 'Restored; verify before routing.'
+                : 'Explicitly excluded from this journey.',
+            }
+          : item
+      ),
+      revision
+    ));
   }
 
   function toggleSelection(id) {
@@ -796,34 +1031,35 @@ async function applyArea(selection) {
     const completed = !segment.completed;
 
     if (canConnect) {
-      await API.patch(
-        `/routes/${plan.id}/segments/${segment.id}`,
-        { completed },
-        { timeout: 15000 }
-      );
+      await API.patch(`/routes/${plan.id}/segments/${segment.id}`, {
+        completed,
+      }, { timeout: 15000 });
     }
 
     await store.change((current) => ({
       ...current,
       plans: current.plans.map((item) =>
-        item.id !== plan.id
-          ? item
-          : {
-              ...item,
-              segments: item.segments.map((entry) =>
-                entry.id === segment.id
-                  ? {
-                      ...entry,
-                      completed,
-                      completed_at: completed
-                        ? new Date().toISOString()
-                        : null,
-                    }
-                  : entry
-              ),
+        item.id !== plan.id ? item : {
+          ...item,
+          segments: item.segments.map((entry) =>
+            entry.id !== segment.id ? entry : {
+              ...entry,
+              completed,
+              completed_at: completed ? new Date().toISOString() : null,
             }
+          ),
+        }
       ),
     }));
+  }
+
+  function saveOption(name, value) {
+    return perform('Saving journey options', () =>
+      store.change((current) => ({
+        ...current,
+        [name]: value,
+      }))
+    );
   }
 
   const selectableIDs = selectedIDs.filter((id) =>
@@ -832,26 +1068,19 @@ async function applyArea(selection) {
     )
   );
 
-  const disabled = Boolean(working);
-  const networkDisabled = disabled || !canConnect || !configured;
-
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-semibold">Route Planner</h2>
-          <p className="text-sm text-slate-400">
-            {working || view.status}
-          </p>
+          <p className="text-sm text-slate-400">{working || view.status}</p>
         </div>
 
         {view.phase === 'active' && (
           <button
             className="terminal-button-secondary"
             disabled={disabled}
-            onClick={() => perform('Starting new journey', () =>
-              store.startNew()
-            )}
+            onClick={() => perform('Starting new journey', () => store.startNew())}
           >
             Start new journey
           </button>
@@ -859,20 +1088,14 @@ async function applyArea(selection) {
       </div>
 
       <nav aria-label="Route Planner sections" className="flex gap-2">
-        {[
-          ['planner', 'Planner'],
-          ['settings', 'Settings'],
-        ].map(([id, label]) => (
+        {['planner', 'settings'].map((id) => (
           <button
             key={id}
-            type="button"
             aria-pressed={page === id}
-            className={page === id
-              ? 'terminal-button'
-              : 'terminal-button-secondary'}
+            className={page === id ? 'terminal-button' : 'terminal-button-secondary'}
             onClick={() => setPage(id)}
           >
-            {label}
+            {id === 'planner' ? 'Planner' : 'Settings'}
           </button>
         ))}
       </nav>
@@ -902,26 +1125,17 @@ async function applyArea(selection) {
         <>
           <div className="terminal-card flex flex-wrap items-center justify-between gap-3 p-4">
             <p>
-              Search area:{' '}
-              <strong>
-                {settingsLoading
-                  ? 'Loading…'
-                  : settings?.area?.label || 'Not selected'}
+              Working area: <strong>
+                {settingsLoading ? 'Loading…' : settings?.area?.label || 'Not selected'}
               </strong>
             </p>
-            <button
-              className="terminal-button-secondary"
-              onClick={() => setPage('settings')}
-            >
-              Change search area
+            <button className="terminal-button-secondary" onClick={() => setPage('settings')}>
+              Change working area
             </button>
           </div>
 
           {view.phase === 'loading' && <p>Loading saved journey…</p>}
-
-          {view.phase === 'error' && (
-            <p role="alert" className="text-red-300">{view.error}</p>
-          )}
+          {view.phase === 'error' && <p role="alert" className="text-red-300">{view.error}</p>}
 
           {view.phase === 'choice' && (
             <section className="terminal-card space-y-4 p-4">
@@ -932,9 +1146,7 @@ async function applyArea(selection) {
                 <button
                   className="terminal-button"
                   disabled={disabled}
-                  onClick={() => perform('Restoring journey', () =>
-                    store.continuePrevious()
-                  )}
+                  onClick={() => perform('Restoring journey', () => store.continuePrevious())}
                 >
                   Continue previous journey
                 </button>
@@ -943,9 +1155,7 @@ async function applyArea(selection) {
               <button
                 className="terminal-button-secondary"
                 disabled={disabled}
-                onClick={() => perform('Starting journey', () =>
-                  store.startNew()
-                )}
+                onClick={() => perform('Starting journey', () => store.startNew())}
               >
                 Start new journey
               </button>
@@ -958,18 +1168,14 @@ async function applyArea(selection) {
               <button
                 className="terminal-button"
                 disabled={disabled}
-                onClick={() => perform('Loading cloud journey', () =>
-                  store.useCloud()
-                )}
+                onClick={() => perform('Loading cloud journey', () => store.useCloud())}
               >
                 Use cloud copy
               </button>
               <button
                 className="terminal-button-secondary"
                 disabled={disabled}
-                onClick={() => perform('Keeping device journey', () =>
-                  store.keepDevice()
-                )}
+                onClick={() => perform('Keeping device journey', () => store.keepDevice())}
               >
                 Keep this device copy
               </button>
@@ -986,27 +1192,17 @@ async function applyArea(selection) {
                     <p>Latitude: {state.origin.latitude}</p>
                     <p>Longitude: {state.origin.longitude}</p>
                     {state.origin.accuracy != null && (
-                      <p>
-                        Estimated accuracy:{' '}
-                        {Math.round(state.origin.accuracy)} m
-                      </p>
+                      <p>Estimated accuracy: {Math.round(state.origin.accuracy)} m</p>
                     )}
                     <p>
-                      Captured:{' '}
-                      {state.origin.captured_at
+                      Captured: {state.origin.captured_at
                         ? new Date(state.origin.captured_at).toLocaleString()
                         : 'Unknown'}
                     </p>
                   </div>
                 ) : <p>No starting location selected.</p>}
 
-                {state.originError && (
-                  <p className="text-red-300">{state.originError}</p>
-                )}
-
-                <p className="text-sm text-slate-400">
-                  Rechecked against the road network for every journey.
-                </p>
+                {state.originError && <p className="text-red-300">{state.originError}</p>}
 
                 <div className="flex flex-wrap gap-2">
                   <button
@@ -1019,10 +1215,7 @@ async function applyArea(selection) {
                   <button
                     className="terminal-button-secondary"
                     disabled={disabled}
-                    onClick={() => setPicker({
-                      origin: true,
-                      initial: mapInitial(),
-                    })}
+                    onClick={() => setPicker({ origin: true, initial: mapInitial() })}
                   >
                     Choose starting point on map
                   </button>
@@ -1032,16 +1225,11 @@ async function applyArea(selection) {
               {picker && (
                 <RouteLocationPicker
                   key={picker.origin ? 'origin' : picker.service.id}
-                  title={picker.origin
-                    ? 'Choose starting location'
-                    : addressOf(picker.service)}
+                  title={picker.origin ? 'Choose starting location' : addressOf(picker.service)}
                   initial={picker.initial}
                   onCancel={() => setPicker(null)}
-                  onConfirm={(point) => perform(
-                    'Checking selected location',
-                    () => picker.origin
-                      ? saveOrigin(point)
-                      : confirmService(picker.service, point)
+                  onConfirm={(point) => perform('Checking selected location', () =>
+                    picker.origin ? saveOrigin(point) : confirmService(picker.service, point)
                   )}
                 />
               )}
@@ -1060,44 +1248,65 @@ async function applyArea(selection) {
 
                 <p className="text-sm text-slate-400">
                   New screenshots replace the current batch.
-                  Different shipments at one address remain separate services.
+                  Different shipments sharing an address remain separate services.
                 </p>
 
                 <p>
-                  {destinations.length} ready destinations ·{' '}
-                  {attention.length} services need attention ·{' '}
-                  {excluded.length} excluded
+                  {cityDestinations.length} Sabugal city destinations ·{' '}
+                  {villageDestinations.length} village destinations ·{' '}
+                  {attention.length} services need attention · {excluded.length} excluded
                 </p>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-2">
+                    <span className="block text-sm">Section order</span>
+                    <select
+                      className="terminal-input w-full"
+                      disabled={disabled}
+                      value={state.section_order || 'villages,city'}
+                      onChange={(event) => saveOption('section_order', event.target.value)}
+                    >
+                      <option value="villages,city">Villages → Sabugal city</option>
+                      <option value="city,villages">Sabugal city → Villages</option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-2">
+                    <span className="block text-sm">Destinations per Google Maps link</span>
+                    <select
+                      className="terminal-input w-full"
+                      disabled={disabled}
+                      value={state.maps_limit || 10}
+                      onChange={(event) => saveOption('maps_limit', Number(event.target.value))}
+                    >
+                      <option value={10}>10 destinations</option>
+                      <option value={4}>4 destinations — mobile-browser option</option>
+                    </select>
+                  </label>
+                </div>
 
                 <label className="flex items-center gap-2">
                   <input
                     type="checkbox"
-                    checked={roundTrip}
+                    checked={Boolean(state.round_trip)}
                     disabled={disabled}
-                    onChange={(event) =>
-                      setRoundTrip(event.target.checked)}
+                    onChange={(event) => saveOption('round_trip', event.target.checked)}
                   />
-                  Return to starting location
+                  Return to starting location after the final section
                 </label>
 
                 <button
                   className="terminal-button"
-                  disabled={
-                    networkDisabled ||
-                    !validPoint(state.origin) ||
-                    !destinations.length
-                  }
-                  onClick={() => perform('Generating routes', generate)}
+                  disabled={networkDisabled || !validPoint(state.origin) || !destinations.length}
+                  onClick={() => perform('Generating separate sections', generate)}
                 >
-                  {attention.length || excluded.length
-                    ? `Generate routes for the ${destinations.length} ready destinations`
-                    : `Generate routes for ${destinations.length} destinations`}
+                  Generate routes for {destinations.length} ready destinations
                 </button>
 
                 {(attention.length > 0 || excluded.length > 0) && (
                   <p className="text-sm text-amber-200">
-                    This action includes only ready destinations.
-                    Unresolved and excluded services remain listed for review.
+                    Only ready destinations are included. Unresolved and excluded
+                    services remain available for review.
                   </p>
                 )}
               </section>
@@ -1107,6 +1316,32 @@ async function applyArea(selection) {
                   {error || state.error}
                 </p>
               )}
+
+              <div className="flex flex-wrap gap-2">
+                {['city', 'villages'].map((section) => (
+                  <button
+                    key={section}
+                    className={mapSection === section ? 'terminal-button' : 'terminal-button-secondary'}
+                    onClick={() => setMapSection(section)}
+                  >
+                    {SECTION_NAMES[section]} map
+                  </button>
+                ))}
+              </div>
+
+              <p className="text-sm text-slate-400">
+                {hasSectionPlan
+                  ? `Showing saved journey #${selectedPlan.id}.`
+                  : 'Showing current ready destinations. Generate routes to obtain the optimized stop order.'}
+              </p>
+
+              <RouteDeliveryMap
+                section={mapSection}
+                stops={mapStops}
+                origin={mapOrigin}
+                contextStops={mapSection === 'villages' ? mapContext : []}
+                orderedPath={mapSection === 'villages' ? ruralPath : []}
+              />
 
               <section className="terminal-card space-y-4 p-4">
                 <h3 className="font-semibold">Addresses and AI assistance</h3>
@@ -1120,14 +1355,9 @@ async function applyArea(selection) {
                     <button
                       key={id}
                       disabled={disabled}
-                      className={listTab === id
-                        ? 'terminal-button'
-                        : 'terminal-button-secondary'}
+                      className={listTab === id ? 'terminal-button' : 'terminal-button-secondary'}
                       onClick={() => perform('Saving view', () =>
-                        store.change((current) => ({
-                          ...current,
-                          tab: id,
-                        }))
+                        store.change((current) => ({ ...current, tab: id }))
                       )}
                     >
                       {label}
@@ -1142,9 +1372,8 @@ async function applyArea(selection) {
                     onClick={() => setSelectedIDs((previous) => [
                       ...new Set([
                         ...previous,
-                        ...shown.filter((service) =>
-                          service.status !== 'excluded'
-                        ).map((service) => service.id),
+                        ...shown.filter((service) => service.status !== 'excluded')
+                          .map((service) => service.id),
                       ]),
                     ])}
                   >
@@ -1169,307 +1398,154 @@ async function applyArea(selection) {
                 {!shown.length && <p>No services in this list.</p>}
 
                 {shown.map((service) => (
-                  <article
+                  <ServiceCard
                     key={service.id}
-                    className="space-y-3 rounded-xl border border-white/15 p-4"
-                  >
-                    <label className="flex items-start gap-3">
-                      <input
-                        type="checkbox"
-                        checked={selectedIDs.includes(service.id)}
-                        disabled={disabled || service.status === 'excluded'}
-                        onChange={() => toggleSelection(service.id)}
-                        className="mt-1"
-                      />
-                      <span className="font-semibold">
-                        {addressOf(service) || 'Address obscured'}
-                      </span>
-                    </label>
-
-                    <p className="text-sm text-slate-400">
-                      {service.source_reference
-                        ? `Shipment ${service.source_reference} · `
-                        : ''}
-                      {service.service_type || 'unknown'} ·{' '}
-                      {service.parcel_count} parcels
-                    </p>
-
-                    {readyToRoute(service, revision) &&
-                      service.location_precision === 'street' && (
-                        <p className="font-medium text-amber-200">
-                          Street-level location
-                        </p>
-                      )}
-
-                    {!readyToRoute(service, revision) && (
-                      <p className="text-amber-200">
-                        {service.reason || 'Verify this address before routing.'}
-                      </p>
+                    service={service}
+                    revision={revision}
+                    disabled={disabled}
+                    networkDisabled={networkDisabled}
+                    selected={selectedIDs.includes(service.id)}
+                    message={messages[service.id]}
+                    onSelect={() => toggleSelection(service.id)}
+                    onSection={(value) => perform('Saving routing section', () =>
+                      changeSection(service, value)
                     )}
-
-                    {service.matched_address && (
-                      <p className="text-sm">
-                        Matched: {service.matched_address}
-                      </p>
+                    onAI={() => askAI([service.id])}
+                    onRetry={(preservePin) => perform('Looking up address', () =>
+                      retry(service, preservePin)
                     )}
-
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        className="terminal-button"
-                        disabled={
-                          networkDisabled || service.status === 'excluded'
-                        }
-                        onClick={() => askAI([service.id])}
-                      >
-                        Ask AI about this address
-                      </button>
-
-                      <button
-                        className="terminal-button-secondary"
-                        disabled={networkDisabled}
-                        onClick={() => perform(
-                          'Looking up address',
-                          () => retry(service)
-                        )}
-                      >
-                        Retry address lookup
-                      </button>
-
-                      <button
-                        className="terminal-button-secondary"
-                        disabled={networkDisabled}
-                        onClick={() => setPicker({
-                          service,
-                          initial: mapInitial(service),
-                        })}
-                      >
-                        Choose location on map
-                      </button>
-
-                      {service.confirmation && (
-                        <button
-                          className="terminal-button-secondary"
-                          disabled={networkDisabled}
-                          onClick={() => perform(
-                            'Checking saved pin',
-                            () => retry(service, true)
-                          )}
-                        >
-                          Check saved pin
-                        </button>
-                      )}
-
-                      <button
-                        className="terminal-button-secondary"
-                        disabled={disabled || !configured}
-                        onClick={() => perform(
-                          'Saving service',
-                          () => toggleExcluded(service)
-                        )}
-                      >
-                        {service.status === 'excluded'
-                          ? 'Restore to journey'
-                          : 'Exclude from this journey'}
-                      </button>
-                    </div>
-
-                    <a
-                      className="terminal-button-secondary inline-block"
-                      href={searchURL(`${addressOf(service)}, Portugal`)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      Search in Google Maps
-                    </a>
-
-                    {readyToRoute(service, revision) && (
-                      <a
-                        className="terminal-button-secondary ml-2 inline-block"
-                        href={directionsURL(service)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        Navigate to checked location
-                      </a>
+                    onPick={() => setPicker({ service, initial: mapInitial(service) })}
+                    onConfirm={(point) => perform('Checking candidate', () =>
+                      confirmService(service, point)
                     )}
-
-                    {messages[service.id] && (
-                      <p role="status" className="text-sm">
-                        {messages[service.id]}
-                      </p>
+                    onExclude={() => perform('Saving service', () =>
+                      toggleExcluded(service)
                     )}
-
-                    {!readyToRoute(service, revision) &&
-                      service.candidates?.length > 0 && (
-                        <details>
-                          <summary className="cursor-pointer">
-                            Review address candidates
-                          </summary>
-
-                          <div className="mt-3 space-y-3">
-                            {service.candidates.filter((candidate) =>
-                              candidate.in_selected_area === true
-                            ).map((candidate) => (
-                              <div
-                                key={candidate.id}
-                                className="space-y-3 rounded border border-white/15 p-3"
-                              >
-                                <p>{candidate.address}</p>
-                                <p className="text-sm text-slate-400">
-                                  {candidate.result_type} ·{' '}
-                                  {candidate.can_confirm
-                                    ? 'Available for confirmation'
-                                    : 'Insufficient street/building evidence'}
-                                </p>
-
-                                <a
-                                  href={searchURL(
-                                    `${candidate.latitude},${candidate.longitude}`
-                                  )}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="terminal-button-secondary inline-block"
-                                >
-                                  Inspect in Google Maps
-                                </a>
-
-                                <button
-                                  className="terminal-button-secondary"
-                                  disabled={
-                                    networkDisabled ||
-                                    !candidate.can_confirm
-                                  }
-                                  onClick={() => perform(
-                                    'Checking candidate',
-                                    () => confirmService(service, candidate)
-                                  )}
-                                >
-                                  Confirm this location
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        </details>
-                      )}
-
-                    <details>
-                      <summary className="cursor-pointer">
-                        Address and AI details
-                      </summary>
-                      <pre className="mt-3 overflow-auto whitespace-pre-wrap break-words text-xs">
-                        {JSON.stringify({
-                          original_address: addressOf(service),
-                          original_evidence: service.original_addresses,
-                          street: service.street,
-                          house_number: service.house_number,
-                          postcode: service.postal_code,
-                          locality: service.locality,
-                          issues: service.extraction_issues,
-                          resolution: service.resolution,
-                        }, null, 2)}
-                      </pre>
-                    </details>
-                  </article>
+                  />
                 ))}
               </section>
 
               {selectedPlan && (
                 <section className="terminal-card space-y-4 p-4">
-                  <h3 className="font-semibold">Saved journey</h3>
+                  <h3 className="font-semibold">Saved journey #{selectedPlan.id}</h3>
 
                   <p>
-                    {(Number(selectedPlan.distance_m) / 1000).toFixed(1)}
-                    {' '}km ·{' '}
-                    {Math.round(Number(selectedPlan.duration_s) / 60)}
-                    {' '}minutes driving
+                    {(Number(selectedPlan.distance_m) / 1000).toFixed(1)} km ·{' '}
+                    {Math.round(Number(selectedPlan.duration_s) / 60)} minutes driving
                   </p>
 
                   {selectedPlan.area_revision !== revision && (
                     <p className="text-amber-200">
-                      Historical journey generated under another area
-                      selection. Its links have not been revalidated.
+                      Historical journey saved under another working-area revision.
                     </p>
                   )}
 
-                  {[...(selectedPlan.segments || [])]
-                    .sort((a, b) => a.sequence - b.sequence)
-                    .map((segment, index) => (
-                      <article
-                        key={segment.id}
-                        className="space-y-3 rounded border border-white/15 p-4"
-                      >
-                        <h4>Route {index + 1}</h4>
+                  {[
+                    ...new Set(
+                      (selectedPlan.segments || [])
+                        .sort((a, b) => a.sequence - b.sequence)
+                        .map((segment) => segment.section || 'previous')
+                    ),
+                  ].map((section) => (
+                    <div key={section} className="space-y-3">
+                      <h4 className="font-semibold">
+                        {SECTION_NAMES[section] || 'Previous route links'}
+                      </h4>
 
-                        <label className="flex gap-2">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(segment.completed)}
-                            disabled={disabled}
-                            onChange={() => perform(
-                              'Saving route completion',
-                              () => toggleSegment(selectedPlan, segment)
-                            )}
-                          />
-                          Route completed
-                        </label>
+                      {[...(selectedPlan.segments || [])]
+                        .filter((segment) => (segment.section || 'previous') === section)
+                        .sort((a, b) => a.sequence - b.sequence)
+                        .map((segment, index, list) => (
+                          <article
+                            key={segment.id}
+                            className="space-y-3 rounded border border-white/15 p-4"
+                          >
+                            <p>
+                              {SECTION_NAMES[section] || 'Route'}{' '}
+                              {segment.section_sequence || index + 1}/
+                              {segment.section_route_count || list.length}
+                              {segment.destination_count != null
+                                ? ` · ${segment.destination_count} destinations`
+                                : ''}
+                              {segment.includes_return ? ' · Includes return to start' : ''}
+                            </p>
 
-                        <a
-                          href={segment.google_maps_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="terminal-button inline-block"
-                        >
-                          Open Route {index + 1} in Google Maps
-                        </a>
+                            <label className="flex gap-2">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(segment.completed)}
+                                disabled={disabled}
+                                onChange={() => perform('Saving completion', () =>
+                                  toggleSegment(selectedPlan, segment)
+                                )}
+                              />
+                              Route completed
+                            </label>
 
-                        <details>
-                          <summary>Destinations and services</summary>
-                          <ol className="mt-3 space-y-3">
-                            {[...(selectedPlan.stops || [])]
-                              .sort((a, b) => a.sequence - b.sequence)
-                              .filter((stop) =>
-                                stop.sequence > segment.start_stop &&
-                                stop.sequence <= segment.end_stop
-                              )
-                              .map((stop) => (
-                                <li key={stop.sequence}>
-                                  <p>{stop.address}</p>
-                                  <p className="text-sm text-slate-400">
-                                    {stop.services?.length || 0} services
-                                    {' · '}
-                                    {(stop.services || []).reduce(
-                                      (sum, service) =>
-                                        sum + (Number(service.parcel_count) || 1),
-                                      0
-                                    )} parcels
-                                  </p>
-                                </li>
-                              ))}
-                          </ol>
-                        </details>
-                      </article>
-                    ))}
+                            <a
+                              href={segment.google_maps_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="terminal-button inline-block"
+                            >
+                              Open in Google Maps
+                            </a>
+
+                            <details>
+                              <summary>Destinations and shipments</summary>
+                              <ol className="mt-3 space-y-3">
+                                {planStops.filter((stop) =>
+                                  stop.sequence > segment.start_stop &&
+                                  stop.sequence <= segment.end_stop
+                                ).map((stop) => (
+                                  <li key={stop.sequence}>
+                                    <p>{stop.address}</p>
+                                    {stop.is_return && (
+                                      <p className="text-sm">Return to starting location</p>
+                                    )}
+                                    {(stop.services || []).map((service, index) => (
+                                      <p key={service.id || index} className="text-sm text-slate-400">
+                                        {service.source_reference || 'Reference unavailable'} ·{' '}
+                                        {service.service_type} ·{' '}
+                                        {Math.max(1, Number(service.parcel_count) || 1)} parcels
+                                      </p>
+                                    ))}
+                                  </li>
+                                ))}
+                              </ol>
+                            </details>
+                          </article>
+                        ))}
+                    </div>
+                  ))}
                 </section>
               )}
 
               {(state.plans || []).length > 0 && (
                 <section className="terminal-card space-y-3 p-4">
                   <h3 className="font-semibold">Saved journeys</h3>
+
                   <div className="flex flex-wrap gap-2">
+                    <button
+                      className="terminal-button-secondary"
+                      disabled={disabled}
+                      onClick={() => perform('Showing current destinations', () =>
+                        store.change((current) => ({ ...current, selectedId: null }))
+                      )}
+                    >
+                      Show current destinations on map
+                    </button>
+
                     {state.plans.map((plan) => (
                       <button
                         key={plan.id}
                         className="terminal-button-secondary"
                         disabled={disabled}
-                        onClick={() => perform('Opening saved journey', () =>
-                          store.change((current) => ({
-                            ...current,
-                            selectedId: plan.id,
-                          }))
+                        onClick={() => perform('Opening journey', () =>
+                          store.change((current) => ({ ...current, selectedId: plan.id }))
                         )}
                       >
-                        Journey #{plan.id} ·{' '}
-                        {plan.segments?.length || 0} routes
+                        Journey #{plan.id} · {plan.segments?.length || 0} links
                       </button>
                     ))}
                   </div>
